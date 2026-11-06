@@ -1,6 +1,6 @@
 # Vehicle ECU Simulator
 
-Proyecto en C++17 para simular el flujo de señales de un vehículo. La Gateway recibe seis señales, califica sus muestras y publica una instantánea por ciclo. La ECU de Control lee esa instantánea y decide el estado, el diagnóstico y la acción simulada. Las dos bibliotecas se prueban con ciclos lógicos, sin depender de un reloj real.
+Proyecto en C++17 para simular el flujo de señales de un vehículo. El simulador produce lecturas correlacionadas a partir de un guion de conducción y fallas. La Gateway califica las seis señales y publica una instantánea por ciclo. La ECU de Control lee esa instantánea y decide el estado, el diagnóstico y la acción simulada. El coordinador ejecuta el recorrido con ciclos lógicos, sin depender de un reloj real.
 
 ## Contrato de señales
 
@@ -39,7 +39,7 @@ Por ejemplo, una muestra recibida en el ciclo 10 queda retenida del 11 al 13 si 
 
 La Gateway mantiene un único estado de señales de capacidad fija. Al aceptar un ciclo, publica por valor una copia de ese estado junto con el número de ciclo y el diagnóstico de entrada. Los lotes y las instantáneas usan almacenamiento fijo y el camino de procesamiento no asigna memoria dinámica. Una instantánea que el llamador conserve mantiene sus datos tras procesar el siguiente ciclo.
 
-`ControlECU::step(const SignalSnapshot&)` lee las observaciones durante la llamada y devuelve un resultado propio por valor. El resultado contiene `cycle`, `state`, `action`, `diagnostics` del ciclo y `latchedFault` si hay una causa enclavada. Control conserva su estado y su diagnóstico de enclavamiento, sin reconstruir el arreglo de señales. El futuro coordinador conservará la instantánea y pasará al Dashboard esa misma instancia junto con el resultado de Control. Los diagnósticos de entrada, como duplicados e IDs desconocidos, siguen disponibles en la instantánea de la Gateway.
+`ControlECU::step(const SignalSnapshot&)` lee las observaciones durante la llamada y devuelve un resultado propio por valor. El resultado contiene `cycle`, `state`, `action`, `diagnostics` del ciclo y `latchedFault` si hay una causa enclavada. Control conserva su estado y su diagnóstico de enclavamiento, sin reconstruir el arreglo de señales. El coordinador entrega al observador esa misma instantánea junto con el resultado de Control. Los diagnósticos de entrada, como duplicados e IDs desconocidos, siguen disponibles en la instantánea de la Gateway.
 
 ## ECU de Control
 
@@ -69,6 +69,42 @@ Los umbrales son parámetros del escenario simulado. La Gateway decide la calida
 
 Control evalúa los monitores independientemente, de modo que una falla de batería no oculta una incoherencia de marcha. Un hallazgo crítico tiene prioridad sobre uno degradante. Para el enclavamiento se elige el primer hallazgo crítico en orden fijo. Primero se revisan calidad, frescura y límites de temperatura y batería en orden de catálogo. Después se evalúan el límite operativo de aceite y la plausibilidad de marcha.
 
+## Simulador y escenarios
+
+### Modelo nominal
+
+`VehicleSimulator::step(pedal)` avanza la planta 0,5 s simulados. El pedal se expresa en porcentaje entre 0 y 100. Un valor fuera de ese intervalo o no finito se rechaza sin alterar la planta. El modelo usa un paso fijo y prescinde de números aleatorios.
+
+| Señal | Cálculo nominal por ciclo |
+| --- | --- |
+| Acelerador | Valor del pedal programado para el ciclo. |
+| Velocidad | Se aproxima al objetivo de `1.2 * pedal` km/h, con una tasa máxima de aumento de 8 (km/h)/s y de descenso de 12 (km/h)/s. |
+| RPM | `max(800, 45 * velocidad)` para una marcha fija simplificada con un mínimo de ralentí. |
+| Temperatura | Empieza en 25 °C y avanza hacia `72 + 0.24 * pedal` °C. En cada ciclo recorre el 3 % de la diferencia restante, con un coeficiente de 0,06 por segundo. |
+| Presión de aceite | `1.2 + 0.0005 * RPM` bar. |
+| Voltaje de batería | `13.6 + 0.00004 * RPM - 0.0025 * pedal` V. |
+
+### Guion e inyección de fallas
+
+Un `Scenario` admite hasta 16 tramos de pedal mediante `addDriveSegment(fin, pedal)`. El recorrido empieza en el ciclo 1 y cada tramo comienza inmediatamente después del fin inclusivo del anterior. El último tramo fija la duración. `addFault(evento)` agrega hasta 32 eventos con ID de señal, ciclo inicial, ciclo final y reemplazo opcional. Ambos límites de la falla son inclusivos.
+
+- Un reemplazo presente sustituye el valor emitido. Puede representar una medición fuera de rango o no finita para ejercitar la validación de Gateway. Un reemplazo vacío omite la lectura durante la falla.
+- Se permiten fallas simultáneas sobre señales distintas. Los intervalos superpuestos para un mismo ID, las fallas fuera del recorrido y los IDs desconocidos se rechazan sin cambiar el guion.
+- La inyección afecta el lote que recibe Gateway. La planta sigue calculando su trayectoria nominal y, al terminar la falla, la señal vuelve al valor nominal del ciclo correspondiente.
+
+### Recorrido integrado
+
+`runScenario(scenario, observer)` ejecuta el recorrido completo por orden de ciclo con un simulador, una Gateway y un Control nuevos en cada ejecución. Durante cada llamada, el observador recibe por referencia de solo lectura la misma instantánea que leyó Control y su decisión para ese ciclo. El recorrido continúa hasta el final del guion aunque se active `SAFE_STATE`. No hay pausas ni consultas al reloj.
+
+Los escenarios `nominal` y `faults` duran 42 ciclos. Ambos programan un pedal de 0 %, 50 %, 25 % y 0 % en tramos que terminan en los ciclos 4, 22, 32 y 42, respectivamente. El escenario `nominal` mantiene la operación normal. El guion `faults` añade estos eventos.
+
+| Ciclos | Inyección | Comportamiento esperado |
+| --- | --- | --- |
+| 5 | Omite la batería. | `DEGRADED` en 5 y 6. El ciclo 6 inicia la confirmación y Control vuelve a `OPERATIONAL` en 7. |
+| 9–10 | Sustituye el acelerador por 120 %. | Gateway detecta una lectura fuera de rango. `DEGRADED` de 9 a 11 y `OPERATIONAL` en 12. |
+| 14–17 | Omite las seis lecturas. | `DEGRADED` de 14 a 16. En 17 caducan las muestras y Control enclava `SAFE_STATE`. Las lecturas vuelven en 18 y el estado permanece enclavado. |
+| 20 | Sustituye la temperatura por 130 °C. | Control detecta sobretemperatura como hallazgo actual. La causa enclavada sigue siendo la del ciclo 17. |
+
 ## Requisitos verificables
 
 | ID | El proyecto debe cumplir | Caso de CTest |
@@ -84,6 +120,10 @@ Control evalúa los monitores independientemente, de modo que una falla de bater
 | CTRL-04 | Evaluar fallas simultáneas y resolver el enclavamiento con prioridad y desempate deterministas. | `control.concurrent_faults` |
 | CTRL-05 | Retener la causa y el ciclo originales al inhibir en `SAFE_STATE`, y volver a `INIT` con un reinicio explícito. | `control.safe_latch` |
 | CTRL-06 | Rechazar ciclos inválidos sin modificar el estado ni contar para la recuperación. | `control.cycle_order` |
+| SIM-01 | Producir lecturas nominales correlacionadas y rechazar pedales inválidos sin avanzar la planta. | `simulation.nominal` |
+| SIM-02 | Aplicar omisiones y reemplazos en sus intervalos exactos, conservar la trayectoria nominal y rechazar una agenda ambigua. | `simulation.fault_schedule` |
+| SIM-03 | Ejecutar el flujo completo por ciclo y reproducir los estados y diagnósticos de los recorridos nominal y con fallas. | `simulation.integration` |
+| SIM-04 | Ejecutar el escenario con fallas desde la línea de comandos hasta completar el guion. | `simulation.cli_faults` |
 
 ## Prácticas que se deben evitar
 
@@ -95,6 +135,7 @@ Control evalúa los monitores independientemente, de modo que una falla de bater
 - Introducir en Gateway reglas de criticidad, transiciones de estado de Control o decisiones de presentación.
 - Omitir un monitor independiente porque ya existe otro hallazgo o interpretar unas RPM ausentes como prueba de que el motor está detenido.
 - Reemplazar la causa enclavada por un diagnóstico posterior o liberar `SAFE_STATE` por la sola desaparición de una falla.
+- Usar el reloj real para avanzar un escenario o cambiar la trayectoria de la planta a partir de lecturas inyectadas.
 
 ## Compilación y pruebas
 
@@ -106,12 +147,15 @@ cmake --build build --config Debug
 (cd build && ctest -C Debug --output-on-failure)
 ```
 
+Con un generador de configuración única, ejecuta los recorridos así.
+
+```sh
+./build/vehicle-ecu-simulator nominal
+./build/vehicle-ecu-simulator faults
+```
+
+La opción predeterminada es `nominal`. El ejecutable imprime el ciclo y el estado de Control y añade `safe_since` cuando hay un enclavamiento. Devuelve 0 cuando completa el guion, incluso si el escenario activa `SAFE_STATE`. Con un generador multiconfiguración, usa el ejecutable de la configuración compilada, por ejemplo `build/Debug/vehicle-ecu-simulator`.
+
 ## Alcance actual
 
-El entregable incluye las bibliotecas de Gateway y Control y sus pruebas en CTest. El ciclo es un número lógico y las acciones de Control son simuladas. El simulador, el coordinador y el Dashboard quedan pendientes de integración. La cadencia física de muestreo y cualquier adaptador de bus requieren contratos propios.
-
-### Responsabilidades previstas
-
-- El **coordinador** será dueño del tick y del orden de ejecución. Entregará cada lote a la Gateway y asociará la instantánea y la decisión de Control al mismo ciclo.
-- El **simulador** producirá las lecturas del vehículo. Los guiones de aceptación fijarán el ciclo de cada evento y sus efectos para reproducir el recorrido.
-- El **Dashboard** presentará la calidad y frescura de las señales y, por separado, el estado y la causa que publique Control.
+El entregable incluye el simulador, Gateway, Control, el coordinador de escenarios y sus pruebas en CTest. El ciclo representa tiempo simulado y las acciones de Control se publican como parte de su resultado. El **Dashboard** previsto presentará la calidad y frescura de las señales y, por separado, el estado y la causa que publique Control. La cadencia física de muestreo y cualquier adaptador de bus requieren contratos propios.

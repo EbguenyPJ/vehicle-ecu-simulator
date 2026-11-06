@@ -22,6 +22,14 @@ add_library(ecu_control STATIC src/control.cpp)
 target_link_libraries(ecu_control PUBLIC ecu_gateway)
 ecu_enable_warnings(ecu_control)
 
+add_library(ecu_simulator STATIC src/simulator.cpp)
+target_link_libraries(ecu_simulator PUBLIC ecu_gateway)
+ecu_enable_warnings(ecu_simulator)
+
+add_executable(vehicle-ecu-simulator src/main.cpp)
+target_link_libraries(vehicle-ecu-simulator PRIVATE ecu_simulator ecu_control)
+ecu_enable_warnings(vehicle-ecu-simulator)
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(gateway_tests tests/gateway_tests.cpp)
@@ -39,4 +47,16 @@ if(BUILD_TESTING)
     foreach(test_case IN ITEMS startup degradation operating_limits concurrent_faults safe_latch cycle_order)
         add_test(NAME control.${test_case} COMMAND control_tests ${test_case})
     endforeach()
+
+    add_executable(simulation_tests tests/simulation_tests.cpp)
+    target_link_libraries(simulation_tests PRIVATE ecu_simulator ecu_control)
+    ecu_enable_warnings(simulation_tests)
+
+    foreach(test_case IN ITEMS nominal fault_schedule integration)
+        add_test(NAME simulation.${test_case} COMMAND simulation_tests ${test_case})
+    endforeach()
+
+    add_test(NAME simulation.cli_faults COMMAND vehicle-ecu-simulator faults)
+    set_tests_properties(simulation.nominal simulation.integration simulation.cli_faults
+                         PROPERTIES TIMEOUT 10)
 endif()
