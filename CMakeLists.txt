@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(EcuPortafolio LANGUAGES CXX)
+project(VehicleEcuSimulator LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,6 +18,10 @@ add_library(ecu_gateway STATIC src/gateway.cpp)
 target_include_directories(ecu_gateway PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 ecu_enable_warnings(ecu_gateway)
 
+add_library(ecu_control STATIC src/control.cpp)
+target_link_libraries(ecu_control PUBLIC ecu_gateway)
+ecu_enable_warnings(ecu_control)
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(gateway_tests tests/gateway_tests.cpp)
@@ -26,5 +30,13 @@ if(BUILD_TESTING)
 
     foreach(test_case IN ITEMS catalog_and_range freshness malformed_batch snapshot cycle_order)
         add_test(NAME gateway.${test_case} COMMAND gateway_tests ${test_case})
+    endforeach()
+
+    add_executable(control_tests tests/control_tests.cpp)
+    target_link_libraries(control_tests PRIVATE ecu_control)
+    ecu_enable_warnings(control_tests)
+
+    foreach(test_case IN ITEMS startup degradation operating_limits concurrent_faults safe_latch cycle_order)
+        add_test(NAME control.${test_case} COMMAND control_tests ${test_case})
     endforeach()
 endif()
