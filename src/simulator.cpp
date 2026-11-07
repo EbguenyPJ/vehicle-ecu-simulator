@@ -46,7 +46,7 @@ bool Scenario::addDriveSegment(Cycle lastCycle, double throttlePercent) noexcept
     return true;
 }
 
-bool Scenario::addFault(FaultEvent event) noexcept
+bool Scenario::addFault(const FaultEvent& event) noexcept
 {
     if (faultCount_ == faults_.size() || !detail::signalIndex(event.signal) ||
         event.firstCycle == 0 || event.firstCycle > event.lastCycle || event.lastCycle > cycles()) {

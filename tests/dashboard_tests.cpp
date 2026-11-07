@@ -107,6 +107,11 @@ void ascii()
 {
     Gateway gateway;
     ControlECU control;
+    ControlResult initial;
+    const auto initialFrame = render(gateway.snapshot(), initial, DashboardFormat::ascii);
+    expectText(initialFrame, "Control: INIT");
+    expectText(initialFrame, "Accion: INHIBIR");
+    expectSignal(initialFrame, "Velocidad", "SIN_MUESTRA", "NO_RECIBIDA", "-");
     SignalBatch batch;
     const double infinity = std::numeric_limits<double>::infinity();
     batch.add(SignalId::speed, 0.0);

@@ -15,6 +15,7 @@ function(ecu_enable_warnings target)
 endfunction()
 
 add_library(ecu_gateway STATIC src/gateway.cpp)
+target_compile_features(ecu_gateway PUBLIC cxx_std_17)
 target_include_directories(ecu_gateway PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 ecu_enable_warnings(ecu_gateway)
 
@@ -78,4 +79,15 @@ if(BUILD_TESTING)
     foreach(test_case IN ITEMS ascii braille pipeline)
         add_test(NAME dashboard.${test_case} COMMAND dashboard_tests ${test_case})
     endforeach()
+
+    add_test(NAME build.consumer COMMAND "${CMAKE_COMMAND}"
+        "-DECU_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DECU_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}/consumer-test/$<CONFIG>"
+        "-DECU_GENERATOR=${CMAKE_GENERATOR}"
+        "-DECU_GENERATOR_PLATFORM=${CMAKE_GENERATOR_PLATFORM}"
+        "-DECU_GENERATOR_TOOLSET=${CMAKE_GENERATOR_TOOLSET}"
+        "-DECU_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+        "-DECU_CONFIG=$<CONFIG>"
+        "-DECU_EXECUTABLE_SUFFIX=${CMAKE_EXECUTABLE_SUFFIX}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_consumer.cmake")
 endif()

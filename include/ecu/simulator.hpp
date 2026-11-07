@@ -9,12 +9,12 @@
 namespace ecu {
 
 struct VehicleReadings {
-    double speedKmh;
-    double engineRpm;
-    double coolantTemperatureC;
-    double throttlePercent;
-    double batteryVoltage;
-    double oilPressureBar;
+    double speedKmh{0.0};
+    double engineRpm{0.0};
+    double coolantTemperatureC{0.0};
+    double throttlePercent{0.0};
+    double batteryVoltage{0.0};
+    double oilPressureBar{0.0};
 };
 
 class VehicleSimulator {
@@ -30,10 +30,10 @@ private:
 };
 
 struct FaultEvent {
-    SignalId signal;
-    Cycle firstCycle;
-    Cycle lastCycle;
-    std::optional<double> replacement;  // Sin valor se omite la lectura.
+    SignalId signal{SignalId::speed};
+    Cycle firstCycle{0};
+    Cycle lastCycle{0};
+    std::optional<double> replacement{};  // Sin valor se omite la lectura.
 };
 
 class Scenario {
@@ -43,7 +43,7 @@ public:
 
     // El primer tramo empieza en 1 y los siguientes son contiguos.
     [[nodiscard]] bool addDriveSegment(Cycle lastCycle, double throttlePercent) noexcept;
-    [[nodiscard]] bool addFault(FaultEvent event) noexcept;
+    [[nodiscard]] bool addFault(const FaultEvent& event) noexcept;
 
     [[nodiscard]] Cycle cycles() const noexcept;
     [[nodiscard]] std::optional<double> throttleAt(Cycle cycle) const noexcept;

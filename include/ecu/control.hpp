@@ -40,9 +40,9 @@ enum class DiagnosticCode {
 };
 
 struct Diagnostic {
-    DiagnosticCode code;
-    Severity severity;
-    std::optional<SignalId> signal;
+    DiagnosticCode code{DiagnosticCode::signal_missing};
+    Severity severity{Severity::degraded};
+    std::optional<SignalId> signal{};
 };
 
 class Diagnostics {
@@ -64,16 +64,16 @@ private:
 };
 
 struct LatchedFault {
-    Cycle cycle;
-    Diagnostic cause;
+    Cycle cycle{0};
+    Diagnostic cause{};
 };
 
 struct ControlResult {
-    Cycle cycle;
-    ControlState state;
-    ControlAction action;
-    Diagnostics diagnostics;
-    std::optional<LatchedFault> latchedFault;
+    Cycle cycle{0};
+    ControlState state{ControlState::init};
+    ControlAction action{ControlAction::inhibit_output};
+    Diagnostics diagnostics{};
+    std::optional<LatchedFault> latchedFault{};
 };
 
 class ControlECU {

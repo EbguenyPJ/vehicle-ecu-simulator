@@ -21,11 +21,11 @@ enum class SignalId : std::uint8_t {
 };
 
 struct SignalDescriptor {
-    SignalId id;
-    std::string_view unit;
-    double minimum;
-    double maximum;
-    Cycle toleratedMissingCycles;
+    SignalId id{SignalId::speed};
+    std::string_view unit{};
+    double minimum{0.0};
+    double maximum{0.0};
+    Cycle toleratedMissingCycles{0};
 };
 
 inline constexpr std::array signalCatalog{
@@ -53,9 +53,9 @@ enum class Freshness {
 };
 
 struct SignalSample {
-    double value;
-    SampleQuality quality;
-    Cycle receivedAt;
+    double value{std::numeric_limits<double>::quiet_NaN()};
+    SampleQuality quality{SampleQuality::non_finite};
+    Cycle receivedAt{0};
 };
 
 struct SignalObservation {
