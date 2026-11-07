@@ -1,6 +1,7 @@
 #include "ecu/control.hpp"
 #include "ecu/dashboard.hpp"
 #include "ecu/gateway.hpp"
+#include "ecu/scaling.hpp"
 #include "ecu/signal.hpp"
 #include "ecu/simulation.hpp"
 #include "ecu/simulator.hpp"
@@ -11,6 +12,22 @@
 
 int main()
 {
+    const auto temperatureScale = ecu::scalingFor(ecu::SignalId::coolant_temperature);
+    const auto batteryScale = ecu::scalingFor(ecu::SignalId::battery_voltage);
+    if (!temperatureScale || !batteryScale) {
+        return EXIT_FAILURE;
+    }
+    const auto temperature = ecu::encodePhysical(85.5, *temperatureScale);
+    const auto battery = ecu::encodePhysical(13.8, *batteryScale);
+    const auto saturated = ecu::encodePhysical(30.0, *batteryScale);
+    if (!temperature || temperature->raw != 1255 || temperature->saturation != ecu::Saturation::none ||
+        ecu::decodeRaw(temperature->raw, *temperatureScale) != 85.5 ||
+        !battery || battery->raw != 116 || battery->saturation != ecu::Saturation::none ||
+        !saturated || saturated->raw != 255 || saturated->saturation != ecu::Saturation::above_range ||
+        ecu::decodeRaw(256, *batteryScale)) {
+        return EXIT_FAILURE;
+    }
+
     ecu::Gateway gateway{ecu::GatewayConfig{0}};
     ecu::SignalBatch batch;
     batch.add(ecu::SignalId::battery_voltage, 13.8);

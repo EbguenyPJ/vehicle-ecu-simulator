@@ -19,6 +19,11 @@ target_compile_features(ecu_gateway PUBLIC cxx_std_17)
 target_include_directories(ecu_gateway PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 ecu_enable_warnings(ecu_gateway)
 
+add_library(ecu_scaling STATIC src/scaling.cpp)
+target_compile_features(ecu_scaling PUBLIC cxx_std_17)
+target_include_directories(ecu_scaling PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+ecu_enable_warnings(ecu_scaling)
+
 add_library(ecu_control STATIC src/control.cpp)
 target_link_libraries(ecu_control PUBLIC ecu_gateway)
 ecu_enable_warnings(ecu_control)
@@ -44,6 +49,14 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(scaling_tests tests/scaling_tests.cpp)
+    target_link_libraries(scaling_tests PRIVATE ecu_scaling ecu_gateway)
+    ecu_enable_warnings(scaling_tests)
+
+    foreach(test_case IN ITEMS profiles rounding saturation invalid_input round_trip observations)
+        add_test(NAME scaling.${test_case} COMMAND scaling_tests ${test_case})
+    endforeach()
+
     add_executable(gateway_tests tests/gateway_tests.cpp)
     target_link_libraries(gateway_tests PRIVATE ecu_gateway)
     ecu_enable_warnings(gateway_tests)

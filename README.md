@@ -4,6 +4,8 @@ Proyecto en C++17 para simular el flujo de señales de un vehículo. El simulado
 
 Gateway publica `VALID`, `INVALID` y `MISSING` con una antigüedad máxima configurable por instancia. Cada instantánea conserva esa política temporal. Control administra el arranque, el autoexamen, la operación, la degradación, el estado seguro y el apagado.
 
+El módulo de escalamiento convierte temperatura y voltaje de batería entre unidades físicas y códigos enteros sin signo. Expone los límites representables y el resultado de saturación, sin modificar las mediciones ni las decisiones de las ECU.
+
 ## Compilación y pruebas
 
 Ejecuta estos comandos desde la raíz del proyecto en un shell POSIX. Se requiere CMake 3.16 o posterior y un compilador C++17.
@@ -48,6 +50,7 @@ flowchart LR
 | `VehicleSimulator` y `Scenario` | Planta correlacionada, conducción e inyección por ciclo. |
 | `Gateway` | Validación y conservación de señales, publicación de instantáneas. |
 | `ControlECU` | Diagnósticos, máquina de estados y acción simulada. |
+| `LinearScale`, `encodePhysical` y `decodeRaw` | Conversión física/cruda, cuantización y saturación explícita. |
 | `renderDashboard` | Vistas ASCII y braille del ciclo y del resultado de Control. |
 | `runScenario` y `main` | Orden del recorrido, selección del escenario y salida. |
 
@@ -61,11 +64,11 @@ vehicle-ecu-simulator/
 ├── include/ecu/          Contratos públicos de señales y componentes
 ├── src/                 Implementaciones y ejecutable de terminal
 ├── tests/               Pruebas de componentes, integración y consumidor CMake
-├── docs/                Decisiones técnicas y análisis de eficiencia
+├── docs/                Decisiones técnicas, eficiencia y escalamiento
 └── benchmarks/          Instrumento de medida y muestras crudas
 ```
 
-Los targets `ecu_gateway`, `ecu_control`, `ecu_simulator` y `ecu_dashboard` permiten construir y verificar cada responsabilidad. El requisito C++17 se propaga a los consumidores mediante la interfaz pública de CMake.
+Los targets `ecu_gateway`, `ecu_control`, `ecu_simulator`, `ecu_dashboard` y `ecu_scaling` permiten construir y verificar cada responsabilidad. `ecu_scaling` proporciona funciones puras independientes del procesamiento de Gateway y Control. El requisito C++17 se propaga a los consumidores mediante la interfaz pública de CMake.
 
 ## STL utilizado
 
@@ -129,7 +132,7 @@ La configuración usa `Cycle` (`uint64_t`): cero exige recibir una muestra en el
 
 ### Calidad y frescura
 
-Una recepción única registra el valor crudo, su calidad y el ciclo de recepción. Los valores finitos dentro del intervalo, incluidos sus extremos, son `in_range`. Los valores finitos fuera del intervalo son `out_of_range`. NaN y ambos infinitos son `non_finite`. Una muestra inválida puede ser reciente.
+Una recepción única registra el valor recibido en unidades físicas, su calidad y el ciclo de recepción. Los valores finitos dentro del intervalo, incluidos sus extremos, son `in_range`. Los valores finitos fuera del intervalo son `out_of_range`. NaN y ambos infinitos son `non_finite`. Una muestra inválida puede ser reciente.
 
 | Frescura         | Condición                                                                                                  |
 | ---------------- | ---------------------------------------------------------------------------------------------------------- |
@@ -177,6 +180,32 @@ const auto missing = initial.count(ecu::SignalStatus::missing); // 6
 ```
 
 Los conteos de los tres resultados suman `signalCount`. Una muestra válida retenida sigue sumando en `VALID`; una muestra inválida caducada pasa a sumar en `MISSING`. Contar no modifica la instantánea ni recalifica el dato mediante otra regla de rango. Cada consulta recorre el catálogo con `std::count_if`, sin crear una colección temporal ni mantener una caché de contadores.
+
+## Escalamiento físico/crudo
+
+`ecu/scaling.hpp` define la conversión `fisico = crudo * factor + offset` y su inversa. Los perfiles disponibles tienen factores, offsets y anchos distintos:
+
+| Señal | Bits sin signo | Crudo permitido | Factor | Offset | Rango físico representable |
+| --- | --- | --- | --- | --- | --- |
+| Temperatura del refrigerante | 16 | 0 a 65535 | 0.1 | −40 | −40 a 6513.5 °C |
+| Voltaje de batería | 8 | 0 a 255 | 0.05 | 8 | 8 a 20.75 V |
+
+`scalingFor(id)` devuelve el perfil de temperatura o batería y `std::nullopt` para los demás IDs. `representableRange(scale)` permite consultar los extremos físicos y el máximo crudo. `encodePhysical(value, scale)` devuelve un `EncodedValue` con el entero y `Saturation::none`, `below_range` o `above_range`. La saturación se decide por el rango físico antes de redondear; NaN, infinitos y configuraciones inválidas se rechazan con `std::nullopt`.
+
+```cpp
+#include "ecu/scaling.hpp"
+
+const auto temperature = ecu::encodePhysical(85.5, ecu::coolantTemperatureScale);
+// temperature->raw == 1255; saturation == ecu::Saturation::none
+const auto battery = ecu::decodeRaw(116, ecu::batteryVoltageScale);
+// battery contiene aproximadamente 13.8 V
+```
+
+La codificación usa `std::round` sobre el crudo calculado en `double`, sin correcciones epsilon. Los empates del valor calculado se alejan de cero; un decimal escrito no siempre corresponde a un empate binario exacto. La decodificación usa `std::fma`. Para valores no saturados de estos perfiles, el error de cuantización es como máximo medio paso físico más el error de coma flotante: aproximadamente 0.05 °C o 0.025 V.
+
+El entero devuelto usa `uint16_t` como tipo común, pero el perfil de batería solo permite ocho bits. `decodeRaw` recibe un `uint32_t` para comprobar el límite antes de estrecharlo: por ejemplo, rechaza 256 para batería y 65536 para temperatura. Los rangos representables describen el código entero y son independientes de los rangos de validez de Gateway; codificar no cambia el valor original, su calidad ni su antigüedad. El simulador, las ECU y la CLI siguen trabajando con sus mediciones físicas.
+
+El [contrato de escalamiento](docs/escalamiento.md) detalla redondeo, saturación, factores negativos, errores y ejemplos. Los consumidores CMake enlazan `ecu_scaling` para utilizar estas funciones.
 
 ## Propiedad de los datos
 
@@ -347,7 +376,13 @@ La sección de Control muestra el estado, la acción simulada y todos los diagn�
 | DASH-03  | Renderizar ambas vistas sobre el mismo ciclo durante el guion real, diferenciando diagnóstico actual, causa enclavada y apagado.                       | `dashboard.pipeline`        |
 | DASH-04  | Presentar `INIT`, `SELF_TEST` y `SHUTDOWN` en ambas vistas con acción inhibida y causa enclavada conservada. | `dashboard.lifecycle` |
 | DASH-05  | Mostrar el resumen del mismo ciclo en ASCII, braille y vista compacta, distinguiendo cantidad de señales de diagnósticos y causa enclavada.                                       | `dashboard.summary`          |
-| BUILD-01 | Propagar C++17 y enlace a un consumidor externo que solicita un estándar anterior; verificar Gateway y sus conteos, autoexamen, operación, apagado terminal y renderizado.        | `build.consumer`            |
+| SCAL-01  | Comprobar perfiles, bits, límites y conversiones conocidas de temperatura y batería.                                                                                           | `scaling.profiles`           |
+| SCAL-02  | Verificar redondeo del crudo calculado, empates representables y vecinos de frontera.                                                                                           | `scaling.rounding`           |
+| SCAL-03  | Saturar por los extremos físicos antes de convertir a entero, incluidos factores negativos y valores finitos extremos.                                                        | `scaling.saturation`         |
+| SCAL-04  | Rechazar parámetros inválidos, valores físicos no finitos y códigos fuera del ancho declarado.                                                                                  | `scaling.invalid_input`      |
+| SCAL-05  | Recorrer todos los códigos de los dos perfiles y comprobar ida y vuelta y tolerancia de cuantización.                                                                          | `scaling.round_trip`         |
+| SCAL-06  | Conservar valores, calidad, presencia y resultados de Gateway al consultar la representación escalada.                                                                          | `scaling.observations`       |
+| BUILD-01 | Propagar C++17 y enlace a un consumidor externo que solicita un estándar anterior; verificar Gateway, Control, renderizado y conversiones físicas/crudas con saturación y límites. | `build.consumer`            |
 
 ## Pruebas y CI
 
@@ -355,9 +390,9 @@ La validación local registrada utiliza macOS 26.5 arm64, AppleClang 21.0.0 y CM
 
 | Configuración | Resultado local |
 | --- | --- |
-| Debug | 36/36 pruebas CTest aprobadas. |
-| Release, benchmark compilado | 36/36 pruebas CTest aprobadas. |
-| Debug con AddressSanitizer y UndefinedBehaviorSanitizer | 36/36 pruebas CTest aprobadas. |
+| Debug | 42/42 pruebas CTest aprobadas. |
+| Release, benchmark compilado | 42/42 pruebas CTest aprobadas. |
+| Debug con AddressSanitizer y UndefinedBehaviorSanitizer | 42/42 pruebas CTest aprobadas. |
 
 Para reproducir estas configuraciones desde la raíz del proyecto:
 
@@ -382,7 +417,9 @@ Para verificar las transiciones de Control: `(cd build/debug && ctest -R '^contr
 
 Para comprobar en conjunto búsquedas, validación, conteos y presentación: `(cd build/debug && ctest -R '^(gateway|control|simulation|dashboard)\.' --output-on-failure)`. El [análisis de eficiencia](docs/eficiencia.md) describe las propiedades verificadas y los límites de las conclusiones de rendimiento.
 
-La prueba `build.consumer` crea un proyecto externo que solicita C++11, incluye las seis cabeceras públicas y enlaza las bibliotecas. CMake eleva su estándar a C++17 mediante el requisito público del target. El consumidor verifica una Gateway con límite cero, conserva una instantánea válida tras la caducidad posterior y comprueba un escenario de tres ciclos con `SELF_TEST → OPERATIONAL → SHUTDOWN` y renderizado. También utiliza directamente el evento de apagado y comprueba su cierre terminal.
+Para comprobar perfiles, redondeo, saturación y límites representables: `(cd build/debug && ctest -R '^scaling\.' --output-on-failure)`.
+
+La prueba `build.consumer` crea un proyecto externo que solicita C++11, incluye las cabeceras públicas y enlaza las bibliotecas. CMake eleva su estándar a C++17 mediante el requisito público del target. El consumidor verifica una Gateway con límite cero, conserva una instantánea válida tras la caducidad posterior y comprueba un escenario de tres ciclos con `SELF_TEST → OPERATIONAL → SHUTDOWN` y renderizado. También utiliza directamente el evento de apagado y comprueba su cierre terminal. Al enlazar `ecu_scaling`, verifica los perfiles, la conversión de temperatura y batería, la saturación explícita y el rechazo de un crudo que excede los ocho bits de batería.
 
 La línea base previa fue revisada con Cppcheck 2.22.0 sobre `src/` y `benchmarks/`, sin diagnósticos de tipo warning, performance o portability.
 
