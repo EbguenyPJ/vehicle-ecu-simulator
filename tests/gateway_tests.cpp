@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -40,6 +41,17 @@ SignalObservation observe(const SignalSnapshot& snapshot, SignalId id)
 void expectStatus(const SignalSnapshot& snapshot, SignalId id, SignalStatus status)
 {
     require(observe(snapshot, id).status == status, "unexpected Gateway signal status");
+}
+
+void expectCounts(const SignalSnapshot& snapshot, std::size_t valid,
+                  std::size_t invalid, std::size_t missing)
+{
+    require(snapshot.count(SignalStatus::valid) == valid &&
+                snapshot.count(SignalStatus::invalid) == invalid &&
+                snapshot.count(SignalStatus::missing) == missing,
+            "unexpected counts of Gateway results");
+    require(valid + invalid + missing == signalCount,
+            "the three counts must partition the known signal catalog");
 }
 
 void expectSample(const SignalSnapshot& snapshot, SignalId id,
@@ -324,6 +336,7 @@ void malformedBatch()
         expectStatus(snapshot, SignalId::speed, SignalStatus::valid);
         expectNeverReceived(snapshot, SignalId::engine_rpm);
         expectSample(snapshot, SignalId::oil_pressure, {2.5, SampleQuality::in_range, 2}, 0, Freshness::fresh);
+        expectCounts(snapshot, 2, 0, 4);
         require(snapshot.diagnostics().hasDuplicate(SignalId::speed) &&
                     snapshot.diagnostics().hasDuplicate(SignalId::engine_rpm),
                 "both duplicated signals must be diagnosed");
@@ -335,6 +348,7 @@ void malformedBatch()
         const auto clean = process(gateway, 3, SignalBatch{});
         expectSample(clean, SignalId::speed, {42.0, SampleQuality::in_range, 1}, 2, Freshness::expired);
         expectStatus(clean, SignalId::speed, SignalStatus::missing);
+        expectCounts(clean, 1, 0, 5);
         require(clean.config().maxAgeCycles == 1, "a malformed batch must not change configuration");
         require(!clean.diagnostics().hasDuplicate(SignalId::speed) && !clean.diagnostics().hasUnknownId(),
                 "input diagnostics must belong only to the cycle that produced them");
@@ -416,12 +430,100 @@ void cycleOrder()
     require(gateway.snapshot().cycle() == maximum, "last accepted cycle must remain visible");
 }
 
+void counts()
+{
+    Gateway gateway{GatewayConfig{1}};
+    expectCounts(gateway.snapshot(), 0, 0, 6);
+    SignalBatch mixed;
+    mixed.add(SignalId::speed, 42.0);
+    mixed.add(SignalId::battery_voltage, 13.8);
+    mixed.add(SignalId::engine_rpm, std::numeric_limits<double>::quiet_NaN());
+    mixed.add(SignalId::coolant_temperature, std::numeric_limits<double>::infinity());
+    mixed.add(SignalId::oil_pressure, -1.0);
+    const auto received = process(gateway, 10, mixed);
+    expectCounts(received, 2, 3, 1);
+    const auto retained = process(gateway, 11, SignalBatch{});
+    expectCounts(retained, 2, 3, 1);
+    const auto expired = process(gateway, 12, SignalBatch{});
+    expectCounts(expired, 0, 0, 6);
+    const auto expiredRpm = observe(expired, SignalId::engine_rpm);
+    require(expiredRpm.sample && expiredRpm.sample->quality == SampleQuality::non_finite,
+            "expired invalid samples must keep their original quality without counting as INVALID");
+
+    SignalBatch recovered;
+    recovered.add(SignalId::speed, 42.0);
+    recovered.add(SignalId::engine_rpm, 2000.0);
+    recovered.add(SignalId::coolant_temperature, 90.0);
+    recovered.add(SignalId::oil_pressure, 2.5);
+    recovered.add(SignalId::battery_voltage, 20.0);
+    const auto reevaluated = process(gateway, 13, recovered);
+    expectCounts(reevaluated, 4, 1, 1);
+    require(!gateway.processCycle(13, nominalBatch()) && !gateway.processCycle(12, nominalBatch()),
+            "rejected cycles cannot replace the results used by counting");
+    expectCounts(gateway.snapshot(), 4, 1, 1);
+    expectCounts(received, 2, 3, 1);
+    expectCounts(retained, 2, 3, 1);
+    expectCounts(expired, 0, 0, 6);
+
+    const auto copied = [] {
+        Gateway strict{GatewayConfig{0}};
+        const auto fresh = process(strict, 1, nominalBatch());
+        expectCounts(fresh, 6, 0, 0);
+        const auto stale = process(strict, 2, SignalBatch{});
+        expectCounts(stale, 0, 0, 6);
+        const auto restored = process(strict, 3, nominalBatch());
+        expectCounts(restored, 6, 0, 0);
+        return stale;
+    }();
+    expectCounts(copied, 0, 0, 6);
+    require(copied.config().maxAgeCycles == 0,
+            "a copied snapshot must count with its own policy after Gateway destruction");
+}
+
+void lookup()
+{
+    struct Expected {
+        SignalId id;
+        double value;
+    };
+    const std::array<Expected, 6> expected{{
+        {SignalId::speed, 41.0}, {SignalId::engine_rpm, 2500.0},
+        {SignalId::coolant_temperature, 88.0}, {SignalId::throttle_position, 35.0},
+        {SignalId::battery_voltage, 13.7}, {SignalId::oil_pressure, 2.4},
+    }};
+    SignalBatch batch;
+    for (auto reading = expected.rbegin(); reading != expected.rend(); ++reading) {
+        require(batch.add(reading->id, reading->value) == InsertResult::inserted,
+                "insertion order must not determine a signal's identity");
+    }
+    Gateway gateway;
+    const auto snapshot = process(gateway, 1, batch);
+    for (const auto& reading : expected) {
+        expectSample(snapshot, reading.id, {reading.value, SampleQuality::in_range, 1},
+                     0, Freshness::fresh);
+    }
+
+    SignalBatch unknowns;
+    for (std::size_t raw = signalCount; raw <= std::numeric_limits<std::uint8_t>::max(); ++raw) {
+        const auto id = static_cast<SignalId>(raw);
+        require(!snapshot.observe(id) && unknowns.add(id, 123.0) == InsertResult::unknown_id,
+                "every ID outside the catalog must be rejected without aliasing a known channel");
+    }
+    const auto unchanged = process(gateway, 2, unknowns);
+    require(unchanged.diagnostics().hasUnknownId(), "unknown inputs must retain their diagnostic");
+    for (const auto& reading : expected) {
+        expectSample(unchanged, reading.id, {reading.value, SampleQuality::in_range, 1},
+                     1, Freshness::retained);
+    }
+    expectCounts(unchanged, 6, 0, 0);
+}
+
 struct TestCase {
     std::string_view name;
     void (*run)();
 };
 
-constexpr std::array<TestCase, 8> cases{{
+constexpr std::array<TestCase, 10> cases{{
     {"catalog_and_range", catalogAndRange},
     {"freshness", freshness},
     {"malformed_batch", malformedBatch},
@@ -430,6 +532,8 @@ constexpr std::array<TestCase, 8> cases{{
     {"status", status},
     {"configurable_freshness", configurableFreshness},
     {"configuration_ownership", configurationOwnership},
+    {"counts", counts},
+    {"lookup", lookup},
 }};
 
 } // namespace

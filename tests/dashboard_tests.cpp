@@ -310,6 +310,13 @@ void pipeline()
         expectText(table, "VEHICLE ECU SIMULATOR | CICLO " + std::to_string(observed) + "\n");
         require(tableAndControl(table) == tableAndControl(dials),
                 "both Dashboard formats must show the same data at every cycle");
+        if (observed == 17) {
+            expectText(table, "Resumen Gateway: VALID=0 INVALID=0 MISSING=6\n");
+        } else if (observed == 9 || observed == 10) {
+            expectText(table, "Resumen Gateway: VALID=5 INVALID=1 MISSING=0\n");
+        } else {
+            expectText(table, "Resumen Gateway: VALID=6 INVALID=0 MISSING=0\n");
+        }
 
         if (observed == 1) {
             expectText(table, "Control: SELF_TEST");
@@ -401,6 +408,56 @@ void lifecycle()
             "rendering must leave shutdown and its original fault unchanged");
 }
 
+void summary()
+{
+    const auto expectEveryView = [](const SignalSnapshot& snapshot, const ControlResult& result,
+                                    std::string_view expected) {
+        for (const auto format : {DashboardFormat::ascii, DashboardFormat::braille}) {
+            expectText(render(snapshot, result, format), expected);
+        }
+        expectText(render(snapshot, result, DashboardFormat::ascii, 48), expected);
+    };
+
+    Gateway gateway{GatewayConfig{1}};
+    ControlECU control;
+    expectEveryView(gateway.snapshot(), ControlResult{}, "Resumen Gateway: VALID=0 INVALID=0 MISSING=6\n");
+    SignalBatch mixed;
+    mixed.add(SignalId::speed, 42.0);
+    mixed.add(SignalId::battery_voltage, 13.8);
+    mixed.add(SignalId::engine_rpm, std::numeric_limits<double>::quiet_NaN());
+    const auto received = process(gateway, control, 1, mixed);
+    expectEveryView(received.snapshot, received.result, "Resumen Gateway: VALID=2 INVALID=1 MISSING=3\n");
+    const auto retained = process(gateway, control, 2, SignalBatch{});
+    expectEveryView(retained.snapshot, retained.result, "Resumen Gateway: VALID=2 INVALID=1 MISSING=3\n");
+    const auto expired = process(gateway, control, 3, SignalBatch{});
+    expectEveryView(expired.snapshot, expired.result, "Resumen Gateway: VALID=0 INVALID=0 MISSING=6\n");
+    expectEveryView(received.snapshot, received.result, "Resumen Gateway: VALID=2 INVALID=1 MISSING=3\n");
+
+    Gateway safetyGateway;
+    ControlECU safetyControl;
+    SignalBatch hot;
+    hot.add(SignalId::speed, 40.0);
+    hot.add(SignalId::engine_rpm, 1800.0);
+    hot.add(SignalId::coolant_temperature, 130.0);
+    hot.add(SignalId::throttle_position, 50.0);
+    hot.add(SignalId::battery_voltage, 13.8);
+    hot.add(SignalId::oil_pressure, 2.5);
+    const auto critical = process(safetyGateway, safetyControl, 1, hot);
+    require(critical.result.state == ControlState::safe_state && critical.result.diagnostics.size() != 0 &&
+                critical.result.latchedFault && critical.result.latchedFault->cycle == 1,
+            "an operational limit must produce a real critical diagnosis independent of Gateway validity");
+    expectEveryView(critical.snapshot, critical.result, "Resumen Gateway: VALID=6 INVALID=0 MISSING=0\n");
+
+    auto healthy = auxiliaryReadings();
+    healthy.add(SignalId::speed, 40.0);
+    healthy.add(SignalId::engine_rpm, 1800.0);
+    const auto recovered = process(safetyGateway, safetyControl, 2, healthy);
+    require(recovered.result.state == ControlState::safe_state && recovered.result.diagnostics.size() == 0 &&
+                recovered.result.latchedFault && recovered.result.latchedFault->cycle == 1,
+            "the original latch must remain after current diagnostics recover");
+    expectEveryView(recovered.snapshot, recovered.result, "Resumen Gateway: VALID=6 INVALID=0 MISSING=0\n");
+}
+
 struct TestCase {
     std::string_view name;
     void (*run)();
@@ -411,6 +468,7 @@ constexpr std::array cases{
     TestCase{"braille", braille},
     TestCase{"pipeline", pipeline},
     TestCase{"lifecycle", lifecycle},
+    TestCase{"summary", summary},
 };
 
 }  // namespace

@@ -22,7 +22,11 @@ int main()
     const auto valid = received->observe(ecu::SignalId::battery_voltage);
     const auto missing = expired->observe(ecu::SignalId::battery_voltage);
     if (!valid || !missing || valid->status != ecu::SignalStatus::valid ||
-        missing->status != ecu::SignalStatus::missing) {
+        missing->status != ecu::SignalStatus::missing ||
+        received->count(ecu::SignalStatus::valid) != 1 ||
+        received->count(ecu::SignalStatus::invalid) != 0 ||
+        received->count(ecu::SignalStatus::missing) != ecu::signalCount - 1 ||
+        expired->count(ecu::SignalStatus::missing) != ecu::signalCount) {
         return EXIT_FAILURE;
     }
 

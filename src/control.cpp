@@ -1,5 +1,6 @@
 #include "ecu/control.hpp"
 
+#include <algorithm>
 #include <cassert>
 
 namespace ecu {
@@ -44,10 +45,11 @@ void Diagnostics::add(DiagnosticCode code, Severity severity, std::optional<Sign
 
 std::optional<Diagnostic> Diagnostics::primary() const noexcept
 {
-    for (const auto& finding : *this) {
-        if (finding.severity == Severity::critical) {
-            return finding;
-        }
+    const auto critical = std::find_if(begin(), end(), [](const Diagnostic& finding) {
+        return finding.severity == Severity::critical;
+    });
+    if (critical != end()) {
+        return *critical;
     }
     if (size_ != 0) {
         return findings_.front();

@@ -49,7 +49,7 @@ if(BUILD_TESTING)
     ecu_enable_warnings(gateway_tests)
 
     foreach(test_case IN ITEMS catalog_and_range freshness malformed_batch snapshot cycle_order
-                               status configurable_freshness configuration_ownership)
+                               status configurable_freshness configuration_ownership counts lookup)
         add_test(NAME gateway.${test_case} COMMAND gateway_tests ${test_case})
     endforeach()
 
@@ -58,7 +58,7 @@ if(BUILD_TESTING)
     ecu_enable_warnings(control_tests)
 
     foreach(test_case IN ITEMS startup degradation operating_limits concurrent_faults safe_latch cycle_order
-                               self_test shutdown)
+                               self_test shutdown diagnostic_priority)
         add_test(NAME control.${test_case} COMMAND control_tests ${test_case})
     endforeach()
 
@@ -66,7 +66,7 @@ if(BUILD_TESTING)
     target_link_libraries(simulation_tests PRIVATE ecu_simulator ecu_control)
     ecu_enable_warnings(simulation_tests)
 
-    foreach(test_case IN ITEMS nominal fault_schedule integration lifecycle acceptance)
+    foreach(test_case IN ITEMS nominal fault_schedule integration lifecycle acceptance search_boundaries)
         add_test(NAME simulation.${test_case} COMMAND simulation_tests ${test_case})
         set_tests_properties(simulation.${test_case} PROPERTIES TIMEOUT 10)
     endforeach()
@@ -81,7 +81,7 @@ if(BUILD_TESTING)
     target_link_libraries(dashboard_tests PRIVATE ecu_dashboard ecu_simulator)
     ecu_enable_warnings(dashboard_tests)
 
-    foreach(test_case IN ITEMS ascii braille pipeline lifecycle)
+    foreach(test_case IN ITEMS ascii braille pipeline lifecycle summary)
         add_test(NAME dashboard.${test_case} COMMAND dashboard_tests ${test_case})
     endforeach()
 

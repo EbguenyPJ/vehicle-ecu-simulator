@@ -162,6 +162,13 @@ void writeSignals(std::ostream& out, const SignalSnapshot& snapshot, bool compac
             writeRow(out, {name, value, descriptor.unit, status, quality, freshness, age});
         }
     }
+
+    const auto invalid = snapshot.count(SignalStatus::invalid);
+    const auto missing = snapshot.count(SignalStatus::missing);
+    const auto valid = signalCount - invalid - missing;
+    out << "Resumen Gateway: VALID=" << std::to_string(valid)
+        << " INVALID=" << std::to_string(invalid)
+        << " MISSING=" << std::to_string(missing) << '\n';
 }
 
 std::optional<double> dialValue(const SignalSnapshot& snapshot, SignalId id)

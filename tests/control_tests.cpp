@@ -505,12 +505,53 @@ void shutdown()
             "terminal shutdown at the largest cycle must remain closed");
 }
 
+void diagnosticPriority()
+{
+    Diagnostics empty;
+    require(empty.begin() == empty.end() && !empty.primary(),
+            "an empty active diagnostic range must have no primary finding");
+
+    Readings noncritical;
+    noncritical.speed = -1.0;
+    noncritical.rpm = 9000.0;
+    noncritical.battery = 20.0;
+    Scenario fallback;
+    const auto warnings = fallback.step(1, noncritical);
+    require(warnings.diagnostics.size() == 3 && !warnings.latchedFault,
+            "several noncritical findings must not create a critical latch");
+    expectPrimary(warnings, DiagnosticCode::signal_out_of_range, Severity::degraded, SignalId::speed);
+
+    Readings lateCritical;
+    lateCritical.speed = -1.0;
+    lateCritical.battery = 20.0;
+    lateCritical.oil = -1.0;
+    Scenario oilFailure;
+    const auto oil = oilFailure.step(1, lateCritical);
+    require(oil.diagnostics.size() == 3 && oil.diagnostics.begin()->severity == Severity::degraded,
+            "a critical oil finding must be selected after earlier noncritical findings");
+    expectPrimary(oil, DiagnosticCode::signal_out_of_range, Severity::critical, SignalId::oil_pressure);
+    expectLatch(oil, 1, DiagnosticCode::signal_out_of_range, SignalId::oil_pressure);
+
+    lateCritical.temperature = 151.0;
+    Scenario competingCritical;
+    const auto both = competingCritical.step(1, lateCritical);
+    require(both.diagnostics.size() == 4, "both critical findings and earlier warnings must remain visible");
+    expectDiagnostic(both, DiagnosticCode::signal_out_of_range, Severity::critical, SignalId::oil_pressure);
+    expectPrimary(both, DiagnosticCode::signal_out_of_range, Severity::critical, SignalId::coolant_temperature);
+    expectLatch(both, 1, DiagnosticCode::signal_out_of_range, SignalId::coolant_temperature);
+
+    const auto recovered = competingCritical.step(2);
+    require(recovered.diagnostics.size() == 0 && !recovered.diagnostics.primary(),
+            "primary selection must ignore findings from previous cycles");
+    expectLatch(recovered, 1, DiagnosticCode::signal_out_of_range, SignalId::coolant_temperature);
+}
+
 struct TestCase {
     std::string_view name;
     void (*run)();
 };
 
-constexpr std::array<TestCase, 8> cases{{
+constexpr std::array<TestCase, 9> cases{{
     {"startup", startup},
     {"self_test", selfTest},
     {"degradation", degradation},
@@ -519,6 +560,7 @@ constexpr std::array<TestCase, 8> cases{{
     {"safe_latch", safeLatch},
     {"cycle_order", cycleOrder},
     {"shutdown", shutdown},
+    {"diagnostic_priority", diagnosticPriority},
 }};
 
 }  // namespace

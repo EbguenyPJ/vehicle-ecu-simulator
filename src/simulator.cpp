@@ -53,12 +53,13 @@ bool Scenario::addFault(const FaultEvent& event) noexcept
         return false;
     }
 
-    for (std::size_t index = 0; index < faultCount_; ++index) {
-        const auto& previous = faults_[index];
-        if (previous.signal == event.signal &&
-            event.firstCycle <= previous.lastCycle && previous.firstCycle <= event.lastCycle) {
-            return false;
-        }
+    const auto activeEnd = faults_.cbegin() + static_cast<std::ptrdiff_t>(faultCount_);
+    const bool overlaps = std::any_of(faults_.cbegin(), activeEnd, [&event](const FaultEvent& previous) {
+        return previous.signal == event.signal &&
+            event.firstCycle <= previous.lastCycle && previous.firstCycle <= event.lastCycle;
+    });
+    if (overlaps) {
+        return false;
     }
 
     faults_[faultCount_] = event;
@@ -77,10 +78,12 @@ std::optional<double> Scenario::throttleAt(Cycle cycle) const noexcept
         return std::nullopt;
     }
 
-    for (std::size_t index = 0; index < driveCount_; ++index) {
-        if (cycle <= drive_[index].lastCycle) {
-            return drive_[index].throttlePercent;
-        }
+    const auto activeEnd = drive_.cbegin() + static_cast<std::ptrdiff_t>(driveCount_);
+    const auto segment = std::find_if(drive_.cbegin(), activeEnd, [cycle](const DriveSegment& current) {
+        return cycle <= current.lastCycle;
+    });
+    if (segment != activeEnd) {
+        return segment->throttlePercent;
     }
     return std::nullopt;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <optional>
 
 #include "ecu/signal.hpp"
@@ -50,6 +51,9 @@ public:
 
     // Devuelve nullopt para un ID desconocido. La observación incluye VALID/INVALID/MISSING.
     [[nodiscard]] std::optional<SignalObservation> observe(SignalId id) const noexcept;
+
+    // Cuenta resultados de la instantánea sin modificar muestras ni diagnósticos.
+    [[nodiscard]] std::size_t count(SignalStatus status) const noexcept;
 
 private:
     friend class Gateway;

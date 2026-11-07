@@ -1,5 +1,6 @@
 #include "ecu/gateway.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace ecu {
@@ -84,6 +85,14 @@ std::optional<SignalObservation> SignalSnapshot::observe(SignalId id) const noex
     return SignalObservation{sample, age, freshness, status};
 }
 
+std::size_t SignalSnapshot::count(SignalStatus status) const noexcept
+{
+    return static_cast<std::size_t>(std::count_if(signalCatalog.begin(), signalCatalog.end(),
+        [this, status](const SignalDescriptor& descriptor) {
+            return observe(descriptor.id)->status == status;
+        }));
+}
+
 Gateway::Gateway(GatewayConfig config) noexcept
 {
     current_.config_ = config;
@@ -100,12 +109,13 @@ std::optional<SignalSnapshot> Gateway::processCycle(Cycle cycle, const SignalBat
         return std::nullopt;
     }
 
-    for (std::size_t index = 0; index < signalCount; ++index) {
+    std::for_each(signalCatalog.begin(), signalCatalog.end(), [&](const SignalDescriptor& descriptor) {
+        const auto index = static_cast<std::size_t>(descriptor.id);
         if (const auto& reading = batch.readings_[index]) {
             current_.samples_[index] = SignalSample{
-                *reading, classify(*reading, signalCatalog[index]), cycle};
+                *reading, classify(*reading, descriptor), cycle};
         }
-    }
+    });
 
     current_.cycle_ = cycle;
     current_.diagnostics_ = batch.diagnostics_;

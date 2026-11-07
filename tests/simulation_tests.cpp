@@ -507,17 +507,83 @@ void acceptance()
     }
 }
 
+void searchBoundaries()
+{
+    const auto maximum = std::numeric_limits<Cycle>::max();
+    Scenario empty;
+    require(!empty.throttleAt(0) && !empty.throttleAt(1) && !empty.throttleAt(maximum),
+            "an empty driving schedule must not expose unused storage as a segment");
+
+    Scenario scenario;
+    require(scenario.addDriveSegment(3, 10.0) && scenario.addDriveSegment(6, 0.0) &&
+                scenario.addDriveSegment(9, 100.0),
+            "three distinct segments must form a contiguous driving schedule");
+    struct ExpectedPedal {
+        Cycle cycle;
+        std::optional<double> pedal;
+    };
+    const std::array<ExpectedPedal, 9> pedalCases{{
+        {0, std::nullopt}, {1, 10.0}, {3, 10.0}, {4, 0.0}, {6, 0.0},
+        {7, 100.0}, {9, 100.0}, {10, std::nullopt}, {maximum, std::nullopt},
+    }};
+    for (const auto& expected : pedalCases) {
+        require(scenario.throttleAt(expected.cycle) == expected.pedal,
+                "segment lookup must preserve inclusive ends, zero pedal and out-of-range absence");
+    }
+    Scenario largestEnd;
+    require(largestEnd.addDriveSegment(maximum, 50.0) && largestEnd.throttleAt(maximum) == 50.0,
+            "the inclusive end lookup must not require incrementing the largest cycle");
+
+    require(scenario.addFault({SignalId::speed, 3, 5, 251.0}),
+            "the first event must be accepted into an empty active fault range");
+    const std::array<std::array<Cycle, 2>, 5> overlaps{{
+        {{1, 3}}, {{5, 7}}, {{3, 5}}, {{2, 6}}, {{4, 4}},
+    }};
+    for (const auto& interval : overlaps) {
+        require(!scenario.addFault({SignalId::speed, interval[0], interval[1], 99.0}),
+                "shared inclusive endpoints, containment and identical intervals must be rejected");
+    }
+    require(scenario.addFault({SignalId::speed, 1, 2, 0.0}) &&
+                scenario.addFault({SignalId::speed, 6, 7, 60.0}) &&
+                scenario.addFault({SignalId::battery_voltage, 3, 5, 0.0}),
+            "adjacent same-signal events and simultaneous different-signal events must remain independent");
+
+    const VehicleReadings nominal{42.0, 2000.0, 90.0, 25.0, 13.8, 2.5};
+    struct ExpectedReadings {
+        double speed;
+        double battery;
+    };
+    const std::array<ExpectedReadings, 9> readings{{
+        {0.0, 13.8}, {0.0, 13.8}, {251.0, 0.0}, {251.0, 0.0}, {251.0, 0.0},
+        {60.0, 13.8}, {60.0, 13.8}, {42.0, 13.8}, {42.0, 13.8},
+    }};
+    Gateway gateway;
+    for (std::size_t index = 0; index < readings.size(); ++index) {
+        const auto cycle = static_cast<Cycle>(index + 1);
+        const auto batch = scenario.batchFor(cycle, nominal);
+        require(batch.has_value(), "the preserved fault schedule must emit every declared cycle");
+        const auto snapshot = gateway.processCycle(cycle, *batch);
+        require(snapshot.has_value(), "the schedule must publish in increasing cycle order");
+        const auto speed = observationOf(*snapshot, SignalId::speed);
+        const auto battery = observationOf(*snapshot, SignalId::battery_voltage);
+        require(speed.sample && battery.sample && speed.sample->value == readings[index].speed &&
+                    battery.sample->value == readings[index].battery && speed.age == 0 && battery.age == 0,
+                "rejecting overlapping events must preserve the complete original schedule");
+    }
+}
+
 struct TestCase {
     std::string_view name;
     void (*run)();
 };
 
-constexpr std::array<TestCase, 5> cases{{
+constexpr std::array<TestCase, 6> cases{{
     {"nominal", nominal},
     {"fault_schedule", faultSchedule},
     {"integration", integration},
     {"lifecycle", lifecycle},
     {"acceptance", acceptance},
+    {"search_boundaries", searchBoundaries},
 }};
 
 }  // namespace

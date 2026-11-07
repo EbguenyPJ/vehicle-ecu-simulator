@@ -61,6 +61,7 @@ vehicle-ecu-simulator/
 ├── include/ecu/          Contratos públicos de señales y componentes
 ├── src/                 Implementaciones y ejecutable de terminal
 ├── tests/               Pruebas de componentes, integración y consumidor CMake
+├── docs/                Decisiones técnicas y análisis de eficiencia
 └── benchmarks/          Instrumento de medida y muestras crudas
 ```
 
@@ -74,9 +75,15 @@ Los targets `ecu_gateway`, `ecu_control`, `ecu_simulator` y `ecu_dashboard` perm
 | `std::optional`                               | Ausencia de muestras, reemplazos de falla y operaciones rechazadas.                     |
 | `std::string_view` y `std::string`            | Etiquetas y texto de presentación.                                                      |
 | `std::clamp` y `std::max`                     | Evolución acotada de velocidad y régimen nominal.                                       |
+| `std::for_each` y lambda                     | Procesar las recepciones del catálogo con una única regla de validación en Gateway.      |
+| `std::count_if` y predicado                  | Contar resultados de Gateway consultando las observaciones de la instantánea.             |
+| `std::find_if` y predicados                  | Seleccionar el primer diagnóstico crítico y localizar el tramo de conducción del ciclo.  |
+| `std::any_of` y predicado                    | Rechazar una falla cuyo intervalo se solape con otro del mismo canal.                     |
 | `std::ostringstream` y `std::locale::classic` | Valores numéricos del Dashboard con formato independiente de la configuración regional. |
 | `std::chrono::steady_clock`                   | Medición de rendimiento con reloj monotónico.                                           |
 | `std::vector`                                 | Captura de la traza del benchmark, preparada antes del intervalo medido.                |
+
+La búsqueda de señales por ID conserva el acceso directo O(1); los algoritmos de búsqueda se aplican donde existe un recorrido por condición. La validación de un lote y el conteo de resultados son O(n), con O(1) de memoria auxiliar. El [análisis de eficiencia](docs/eficiencia.md) distingue esos costos del almacenamiento O(n), explica los cambios y compara los contenedores considerados.
 
 ## Contrato de señales
 
@@ -156,6 +163,20 @@ Caso de referencia con `maxAgeCycles = 3`, muestra válida recibida en el ciclo 
 | 12 | 2 | `retained` | `VALID` |
 | 13 | 3 | `retained` | `VALID` |
 | 14 | 4 | `expired` | `MISSING` |
+
+### Conteo por resultado
+
+`SignalSnapshot::count(SignalStatus)` devuelve el número de señales conocidas que tienen ese resultado en el ciclo de la instantánea. Consulta las mismas observaciones que usa Control, por lo que aplica la configuración temporal y conserva la precedencia de `MISSING` sobre la calidad de una muestra caducada.
+
+```cpp
+ecu::Gateway gateway;
+const auto initial = gateway.snapshot();
+const auto valid = initial.count(ecu::SignalStatus::valid);     // 0
+const auto invalid = initial.count(ecu::SignalStatus::invalid); // 0
+const auto missing = initial.count(ecu::SignalStatus::missing); // 6
+```
+
+Los conteos de los tres resultados suman `signalCount`. Una muestra válida retenida sigue sumando en `VALID`; una muestra inválida caducada pasa a sumar en `MISSING`. Contar no modifica la instantánea ni recalifica el dato mediante otra regla de rango. Cada consulta recorre el catálogo con `std::count_if`, sin crear una colección temporal ni mantener una caché de contadores.
 
 ## Propiedad de los datos
 
@@ -283,6 +304,8 @@ El resultado de Gateway aparece bajo la columna `Gateway` de la tabla o el campo
 
 Las filas de señales caben en 80 columnas incluso con edad máxima de 64 bits. La presentación usa seis cifras significativas; si un valor excede los diez caracteres reservados, usa notación científica con dos decimales. Ese redondeo afecta solo al texto, no al valor conservado por Gateway.
 
+Después de las señales, ambas vistas y el formato compacto muestran un resumen del mismo ciclo, por ejemplo `Resumen Gateway: VALID=2 INVALID=1 MISSING=3`. El Dashboard consulta los conteos de `INVALID` y `MISSING`, y obtiene `VALID` por diferencia con `signalCount`: son dos recorridos del catálogo. El resumen cuenta señales, no diagnósticos de Control. Por eso una sobretemperatura dentro del rango aceptado por Gateway puede sumar en `VALID` mientras Control publica un diagnóstico crítico.
+
 La sección de Control muestra el estado, la acción simulada y todos los diagnósticos del ciclo. La causa y el ciclo originales del enclavamiento aparecen por separado. En el ciclo 18 de `faults`, las señales recuperan su frescura y Control sigue en `SAFE_STATE` con la causa del ciclo 17. En el 20, la sobretemperatura aparece como diagnóstico activo junto a esa misma causa enclavada. El último cuadro muestra `SHUTDOWN` con salida inhibida y conserva esa misma causa enclavada. Ambos formatos escriben un cuadro por ciclo en secuencia, sin códigos ANSI ni pausas.
 
 ## Cobertura de pruebas
@@ -297,6 +320,8 @@ La sección de Control muestra el estado, la acción simulada y todos los diagn�
 | GW-06    | Publicar `VALID/INVALID/MISSING`, conservar la calidad al caducar y volver a evaluar cada nueva recepción.                                                                      | `gateway.status`            |
 | GW-07    | Aplicar el límite configurado a las seis señales, incluidos cero, frontera inclusiva, saltos y máximo de 64 bits.                                                              | `gateway.configurable_freshness` |
 | GW-08    | Conservar configuración y significado de instantáneas al modificar la configuración original, sustituir o destruir Gateway.                                                    | `gateway.configuration_ownership` |
+| GW-09    | Contar resultados con muestras válidas, no finitas, ausentes, retenidas, caducadas o recuperadas; conservar conteos de instantáneas y ciclos rechazados.                         | `gateway.counts`             |
+| GW-10    | Asociar cada ID con su señal independientemente del orden de inserción y rechazar todos los IDs desconocidos de 8 bits sin afectar canales conocidos.                           | `gateway.lookup`             |
 | CTRL-01  | Publicar el autoexamen inhibido antes de operar, supervisar la ventana de arranque y detectar una falla crítica desde el primer ciclo.                                           | `control.startup`           |
 | CTRL-02  | Limitar la operación ante un hallazgo degradante y exigir dos ciclos sanos consecutivos para recuperarse.                                                                      | `control.degradation`       |
 | CTRL-03  | Evaluar los límites de operación y distinguir la falta de una muestra de su caducidad.                                                                                         | `control.operating_limits`  |
@@ -305,12 +330,14 @@ La sección de Control muestra el estado, la acción simulada y todos los diagn�
 | CTRL-06  | Rechazar ciclos inválidos sin modificar el estado ni contar para la recuperación.                                                                                              | `control.cycle_order`       |
 | CTRL-07  | Mantener el autoexamen inhibido, resolver su ventana temporal y responder a fallas críticas o recuperación sin esperas reales.                                                  | `control.self_test`         |
 | CTRL-08  | Apagar desde todos los estados activos, conservar fallas simultáneas y enclavadas, rechazar eventos de ciclos inválidos y mantener el cierre terminal.                          | `control.shutdown`          |
+| CTRL-09  | Seleccionar el primer crítico aunque aparezca después de hallazgos degradantes; conservar el desempate, el fallback y la ausencia de diagnóstico primario.                      | `control.diagnostic_priority` |
 | SIM-01   | Producir lecturas nominales correlacionadas y rechazar pedales inválidos sin avanzar la planta.                                                                                | `simulation.nominal`        |
 | SIM-02   | Aplicar omisiones y reemplazos en sus intervalos exactos, conservar la trayectoria nominal y rechazar una agenda ambigua.                                                      | `simulation.fault_schedule` |
 | SIM-03   | Ejecutar el flujo completo por ciclo y reproducir los estados y diagnósticos de los recorridos nominal y con fallas.                                                           | `simulation.integration`    |
 | SIM-04   | Ejecutar el escenario con fallas desde la línea de comandos hasta completar el guion.                                                                                          | `simulation.cli_faults`     |
 | SIM-05   | Terminar recorridos de uno, dos y tres ciclos sin añadir lecturas, conservando una falla crítica que coincida con el apagado.                                                   | `simulation.lifecycle`      |
 | SIM-06   | Verificar y reproducir cada ciclo de batería inválida, aceite inválido y temperatura ausente/recuperada, con resultados de Gateway y decisiones de Control.                     | `simulation.acceptance`     |
+| SIM-07   | Buscar solo en los tramos y eventos registrados, preservar extremos inclusivos y rechazar solapamientos sin modificar la agenda aceptada.                                       | `simulation.search_boundaries` |
 | CLI-01   | Completar el recorrido nominal con autoexamen y apagado desde la línea de comandos.                                                                                           | `simulation.cli_nominal`    |
 | CLI-02   | Ejecutar el escenario aislado de batería inválida desde la línea de comandos.                                                                                                 | `simulation.cli_battery_fault` |
 | CLI-03   | Ejecutar el escenario aislado de aceite inválido desde la línea de comandos.                                                                                                  | `simulation.cli_oil_fault`   |
@@ -319,7 +346,8 @@ La sección de Control muestra el estado, la acción simulada y todos los diagn�
 | DASH-02  | Dibujar ambos relojes braille y conservar la tabla de señales y el resultado de Control. Mostrar agujas solo para lecturas frescas y válidas.                                  | `dashboard.braille`         |
 | DASH-03  | Renderizar ambas vistas sobre el mismo ciclo durante el guion real, diferenciando diagnóstico actual, causa enclavada y apagado.                       | `dashboard.pipeline`        |
 | DASH-04  | Presentar `INIT`, `SELF_TEST` y `SHUTDOWN` en ambas vistas con acción inhibida y causa enclavada conservada. | `dashboard.lifecycle` |
-| BUILD-01 | Propagar C++17 y enlace a un consumidor externo que solicita un estándar anterior; verificar Gateway, autoexamen, operación, apagado terminal y renderizado.                     | `build.consumer`            |
+| DASH-05  | Mostrar el resumen del mismo ciclo en ASCII, braille y vista compacta, distinguiendo cantidad de señales de diagnósticos y causa enclavada.                                       | `dashboard.summary`          |
+| BUILD-01 | Propagar C++17 y enlace a un consumidor externo que solicita un estándar anterior; verificar Gateway y sus conteos, autoexamen, operación, apagado terminal y renderizado.        | `build.consumer`            |
 
 ## Pruebas y CI
 
@@ -327,9 +355,9 @@ La validación local registrada utiliza macOS 26.5 arm64, AppleClang 21.0.0 y CM
 
 | Configuración | Resultado local |
 | --- | --- |
-| Debug | 31/31 pruebas CTest aprobadas. |
-| Release, benchmark compilado | 31/31 pruebas CTest aprobadas. |
-| Debug con AddressSanitizer y UndefinedBehaviorSanitizer | 31/31 pruebas CTest aprobadas. |
+| Debug | 36/36 pruebas CTest aprobadas. |
+| Release, benchmark compilado | 36/36 pruebas CTest aprobadas. |
+| Debug con AddressSanitizer y UndefinedBehaviorSanitizer | 36/36 pruebas CTest aprobadas. |
 
 Para reproducir estas configuraciones desde la raíz del proyecto:
 
@@ -351,6 +379,8 @@ cmake --build build/sanitizers --parallel
 Estos flags corresponden a Clang/GCC en un shell POSIX; el workflow utiliza las opciones adecuadas de CMake para MSVC. Para ejecutar solo las pruebas de Gateway en Debug: `(cd build/debug && ctest -R '^gateway\.' --output-on-failure)`.
 
 Para verificar las transiciones de Control: `(cd build/debug && ctest -R '^control\.' --output-on-failure)`. Para los escenarios de aceptación: `(cd build/debug && ctest -R '^simulation\.acceptance$' --output-on-failure)`.
+
+Para comprobar en conjunto búsquedas, validación, conteos y presentación: `(cd build/debug && ctest -R '^(gateway|control|simulation|dashboard)\.' --output-on-failure)`. El [análisis de eficiencia](docs/eficiencia.md) describe las propiedades verificadas y los límites de las conclusiones de rendimiento.
 
 La prueba `build.consumer` crea un proyecto externo que solicita C++11, incluye las seis cabeceras públicas y enlaza las bibliotecas. CMake eleva su estándar a C++17 mediante el requisito público del target. El consumidor verifica una Gateway con límite cero, conserva una instantánea válida tras la caducidad posterior y comprueba un escenario de tres ciclos con `SELF_TEST → OPERATIONAL → SHUTDOWN` y renderizado. También utiliza directamente el evento de apagado y comprueba su cierre terminal.
 
