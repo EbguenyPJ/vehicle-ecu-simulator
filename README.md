@@ -2,7 +2,7 @@
 
 Proyecto en C++17 para simular el flujo de señales de un vehículo. El simulador produce lecturas correlacionadas a partir de un guion de conducción y fallas. La Gateway califica las seis señales y publica una instantánea por ciclo. La ECU de Control lee esa instantánea y decide el estado, el diagnóstico y la acción simulada. El Dashboard presenta la misma instantánea junto con el resultado de Control. El coordinador ejecuta el recorrido con ciclos lógicos, sin depender de un reloj real.
 
-Incorpora los resultados `VALID`, `INVALID` y `MISSING`, y configura la antigüedad máxima por instancia de Gateway. Cada instantánea conserva esa política temporal. Control mantiene sus cuatro estados y sus reglas actuales.
+Gateway publica `VALID`, `INVALID` y `MISSING` con una antigüedad máxima configurable por instancia. Cada instantánea conserva esa política temporal. Control administra el arranque, el autoexamen, la operación, la degradación, el estado seguro y el apagado.
 
 ## Compilación y pruebas
 
@@ -14,17 +14,20 @@ cmake --build build --config Debug
 (cd build && ctest -C Debug --output-on-failure)
 ```
 
-Con un generador de configuración única, la sintaxis del ejecutable es `./build/vehicle-ecu-simulator [nominal|faults] [--dashboard auto|ascii|braille]`. Por ejemplo, puedes ejecutar el recorrido nominal con el formato automático, guardar un registro ASCII o solicitar los relojes braille explícitamente.
+Con un generador de configuración única, la sintaxis del ejecutable es `./build/vehicle-ecu-simulator [nominal|faults|battery-fault|oil-fault|temperature-dropout] [--dashboard auto|ascii|braille]`. Por ejemplo, puedes ejecutar el recorrido nominal con el formato automático, guardar un registro ASCII o solicitar los relojes braille explícitamente.
 
 ```sh
 ./build/vehicle-ecu-simulator nominal
 ./build/vehicle-ecu-simulator faults --dashboard ascii > fallas.txt
 ./build/vehicle-ecu-simulator faults --dashboard braille
+./build/vehicle-ecu-simulator battery-fault --dashboard ascii
+./build/vehicle-ecu-simulator oil-fault --dashboard ascii
+./build/vehicle-ecu-simulator temperature-dropout --dashboard ascii
 ```
 
 El escenario predeterminado es `nominal` y el formato predeterminado es `auto`. En macOS y Linux, `auto` selecciona braille si la salida es una terminal de al menos 80 columnas y la configuración regional indica UTF-8. Usa ASCII en una terminal más estrecha, al redirigir la salida o si la capacidad de la terminal no puede confirmarse. En otros entornos, la selección automática usa ASCII. La opción explícita `--dashboard braille` genera UTF-8 incluso con la salida redirigida.
 
-El ejecutable devuelve 0 cuando completa el guion, incluso si el escenario activa `SAFE_STATE`. Con un generador multiconfiguración, usa el ejecutable de la configuración compilada, por ejemplo `build/Debug/vehicle-ecu-simulator`.
+El ejecutable devuelve 0 cuando completa el guion y publica `SHUTDOWN`, incluso si el escenario activó `SAFE_STATE`. Una falla simulada se comunica mediante los resultados de Control; un error de ejecución o de salida produce un código distinto de cero. Con un generador multiconfiguración, usa el ejecutable de la configuración compilada, por ejemplo `build/Debug/vehicle-ecu-simulator`.
 
 ## Arquitectura
 
@@ -158,20 +161,48 @@ Caso de referencia con `maxAgeCycles = 3`, muestra válida recibida en el ciclo 
 
 La Gateway mantiene un único estado de señales de capacidad fija. Al aceptar un ciclo, publica por valor una copia de ese estado junto con el número de ciclo, el diagnóstico de entrada y la configuración temporal. Los lotes y las instantáneas usan almacenamiento fijo y el camino de procesamiento no asigna memoria dinámica. Una instantánea que el llamador conserve mantiene sus datos y la política necesaria para interpretar su resultado tras procesar el siguiente ciclo.
 
-`ControlECU::step(const SignalSnapshot&)` lee las observaciones durante la llamada y devuelve un resultado propio por valor. El resultado contiene `cycle`, `state`, `action`, `diagnostics` del ciclo y `latchedFault` si hay una causa enclavada. Control conserva su estado y su diagnóstico de enclavamiento, sin reconstruir el arreglo de señales. El coordinador entrega al observador esa misma instantánea junto con el resultado de Control. Los diagnósticos de entrada, como duplicados e IDs desconocidos, siguen disponibles en la instantánea de la Gateway.
+`ControlECU::step(const SignalSnapshot&, ControlEvent)` lee las observaciones y el evento durante la llamada y devuelve un resultado propio por valor. El evento predeterminado es `ControlEvent::none`. El resultado contiene `cycle`, `state`, `action`, `diagnostics` del ciclo y `latchedFault` si hay una causa enclavada. Control conserva su estado y su diagnóstico de enclavamiento, sin reconstruir el arreglo de señales. El coordinador entrega al observador esa misma instantánea junto con el resultado de Control. Los diagnósticos de entrada, como duplicados e IDs desconocidos, siguen disponibles en la instantánea de la Gateway.
 
 ## ECU de Control
 
 ### Máquina de estados
 
-| Estado        | Acción simulada | Política                                                                                                                                                                                                                                                                                                                                                                                                      |
-| ------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `INIT`        | Inhibida        | El primer ciclo aceptado inicia la ventana de arranque en `t0`. Un ciclo sin hallazgos permite pasar de inmediato a `OPERATIONAL`. Ante un hallazgo degradante, espera durante `t0` y `t0 + 1`. Desde `t0 + 2`, la ausencia de un canal crítico nunca recibido provoca `SAFE_STATE`. Los demás hallazgos degradantes provocan `DEGRADED`. Un hallazgo crítico activa `SAFE_STATE` incluso en el primer ciclo. |
-| `OPERATIONAL` | Normal          | Una condición degradante limita la operación. Una condición crítica inhibe la operación y enclava `SAFE_STATE`.                                                                                                                                                                                                                                                                                               |
-| `DEGRADED`    | Limitada        | Regresa a `OPERATIONAL` con dos ciclos sanos consecutivos. El primero publica `recovery_pending`. Una nueva falla o un salto en la secuencia interrumpe la confirmación. Una condición crítica enclava `SAFE_STATE`.                                                                                                                                                                                          |
-| `SAFE_STATE`  | Inhibida        | Conserva la causa y el ciclo que originaron el enclavamiento. Sigue publicando hallazgos actuales aunque cambien o desaparezcan.                                                                                                                                                                                                                                                                              |
+`ControlECU::state()` permite consultar el estado actual. Una instancia nueva está en `INIT`; todas las acciones simuladas permanecen inhibidas hasta completar el autoexamen.
 
-Control acepta ciclos positivos estrictamente crecientes. Si la instantánea es del ciclo 0, se repite o retrocede, `step` devuelve `std::nullopt` sin cambiar el estado ni la confirmación de recuperación. `reset()` solo actúa en `SAFE_STATE`. Vuelve a `INIT`, conserva el último ciclo procesado y comienza una nueva ventana con la siguiente instantánea aceptada.
+| Estado | Acción simulada | Comportamiento |
+| --- | --- | --- |
+| `INIT` | Inhibida | El primer ciclo aceptado fija `t0` y publica `SELF_TEST`, incluso si las señales son sanas. Una falla crítica actúa inmediatamente. |
+| `SELF_TEST` | Inhibida | Verifica los resultados de Gateway y las reglas operativas. Un ciclo sano posterior permite operar. Los hallazgos degradantes esperan durante `t0` y `t0 + 1`; desde `t0 + 2` llevan a `DEGRADED`, o a `SAFE_STATE` si falta un canal crítico nunca recibido. |
+| `OPERATIONAL` | Normal | Una condición degradante limita la operación. Una condición crítica inhibe la operación y enclava su causa. |
+| `DEGRADED` | Limitada | Requiere dos ciclos sanos consecutivos para recuperar la operación. El primero publica `recovery_pending`; una nueva falla o un salto interrumpe la confirmación. |
+| `SAFE_STATE` | Inhibida | Conserva la causa y el ciclo originales. Sigue diagnosticando las entradas actuales aunque se recuperen o aparezcan otras fallas. |
+| `SHUTDOWN` | Inhibida | Es terminal para la instancia. Conserva los diagnósticos del ciclo de apagado y la causa enclavada, si existe. Rechaza nuevos ciclos y `reset()`. |
+
+El autoexamen utiliza los mismos monitores de operación; no introduce esperas reales ni una simulación de hardware adicional. Una medición crítica inválida, caducada o que exceda un límite operativo lleva a estado seguro incluso durante el primer ciclo. La tolerancia inicial solo atenúa la ausencia de canales que nunca se recibieron.
+
+### Transiciones y prioridad
+
+| Estado de origen | Condición / evento | Resultado |
+| --- | --- | --- |
+| `INIT` | Primer ciclo aceptado, sin falla crítica | `SELF_TEST`, salida inhibida |
+| `SELF_TEST` | Ciclo sano posterior al primero | `OPERATIONAL` |
+| `SELF_TEST` | Hallazgo degradante durante la ventana inicial | Permanece en `SELF_TEST` |
+| `SELF_TEST` | Hallazgo degradante al terminar la ventana inicial | `DEGRADED` |
+| `INIT`, `SELF_TEST`, `OPERATIONAL`, `DEGRADED` | Hallazgo crítico | `SAFE_STATE`, primera causa enclavada |
+| `OPERATIONAL` | Hallazgo degradante | `DEGRADED` |
+| `DEGRADED` | Primer ciclo sano o salto entre ciclos sanos | Permanece en `DEGRADED`, `recovery_pending` |
+| `DEGRADED` | Segundo ciclo sano consecutivo | `OPERATIONAL` |
+| `SAFE_STATE` | Nuevas entradas, sin apagado | Permanece enclavado |
+| Cualquier estado activo, incluido `SAFE_STATE` | `ControlEvent::shutdown` sobre un ciclo aceptado | `SHUTDOWN` |
+| `SHUTDOWN` | Cualquier llamada a `step` o `reset` | Rechazo, sin cambios |
+
+Control acepta instantáneas de ciclos positivos estrictamente crecientes. Un ciclo cero, repetido o anterior devuelve `std::nullopt`, incluso si contiene una solicitud de apagado; el rechazo no cambia el estado, el enclavamiento ni la recuperación pendiente. También devuelve `std::nullopt` si la instancia ya está apagada.
+
+En un ciclo aceptado, primero se evalúan los resultados de Gateway y los monitores, y se conserva la primera causa crítica si corresponde. Después se aplica la solicitud de apagado. Si coinciden falla crítica y apagado, el resultado es `SHUTDOWN` con salida inhibida, el diagnóstico crítico y su causa enclavada: el apagado no oculta la falla ni reemplaza un enclavamiento anterior.
+
+El coordinador solicita el apagado mediante `control.step(snapshot, ControlEvent::shutdown)`. Dashboard y Gateway no originan este evento ni modifican la máquina de estados. Sin el segundo argumento, `step(snapshot)` equivale a `step(snapshot, ControlEvent::none)`.
+
+`reset()` solo actúa en `SAFE_STATE`: vuelve a `INIT`, borra la causa enclavada, conserva el último ciclo procesado y abre una nueva ventana con la siguiente instantánea aceptada. El siguiente ciclo no crítico publica `SELF_TEST`; otro ciclo sano permite volver a operar. El apagado no se rearma: para una nueva ejecución se crea otra instancia de `ControlECU`.
 
 ### Política diagnóstica
 
@@ -213,16 +244,31 @@ Un `Scenario` admite hasta 16 tramos de pedal mediante `addDriveSegment(fin, ped
 
 ### Recorrido integrado
 
-`runScenario(scenario, observer)` ejecuta el recorrido completo por orden de ciclo con un simulador, una Gateway y un Control nuevos en cada ejecución. Durante cada llamada, el observador recibe por referencia de solo lectura la misma instantánea que leyó Control y su decisión para ese ciclo. El recorrido continúa hasta el final del guion aunque se active `SAFE_STATE`. No hay pausas ni consultas al reloj.
+`runScenario(scenario, observer)` ejecuta el recorrido por orden de ciclo con un simulador, una Gateway y un Control nuevos en cada llamada. El observador recibe por referencia de solo lectura la misma instantánea que leyó Control y su decisión. El recorrido continúa aunque se active `SAFE_STATE`; en el último ciclo declarado, el coordinador envía `ControlEvent::shutdown` y publica el resultado antes de terminar. No se agrega un ciclo extra ni se utilizan pausas o consultas al reloj.
 
-Los escenarios `nominal` y `faults` duran 42 ciclos. Ambos programan un pedal de 0 %, 50 %, 25 % y 0 % en tramos que terminan en los ciclos 4, 22, 32 y 42, respectivamente. El escenario `nominal` mantiene la operación normal. El guion `faults` añade estos eventos.
+Un escenario vacío se rechaza. Un escenario de un solo ciclo publica directamente `SHUTDOWN`: el evento de apagado tiene prioridad sobre la publicación de `SELF_TEST`. Los recorridos más largos permiten observar el autoexamen y la operación antes del apagado.
 
-| Ciclos | Inyección                            | Comportamiento esperado                                                                                                                       |
-| ------ | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| 5      | Omite la batería.                    | `DEGRADED` en 5 y 6. El ciclo 6 inicia la confirmación y Control vuelve a `OPERATIONAL` en 7.                                                 |
-| 9–10   | Sustituye el acelerador por 120 %.   | Gateway detecta una lectura fuera de rango. `DEGRADED` de 9 a 11 y `OPERATIONAL` en 12.                                                       |
-| 14–17  | Omite las seis lecturas.             | `DEGRADED` de 14 a 16. En 17 caducan las muestras y Control enclava `SAFE_STATE`. Las lecturas vuelven en 18 y el estado permanece enclavado. |
-| 20     | Sustituye la temperatura por 130 °C. | Control detecta sobretemperatura como hallazgo actual. La causa enclavada sigue siendo la del ciclo 17.                                       |
+Todos los escenarios disponibles duran 42 ciclos y comparten el mismo guion de pedal: 0 %, 50 %, 25 % y 0 %, en tramos que terminan en 4, 22, 32 y 42. El ciclo 1 no crítico publica `SELF_TEST`; el ciclo 42 publica `SHUTDOWN`. Las entradas y decisiones se conservan en la misma secuencia de ciclos para las vistas ASCII y braille.
+
+| Escenario CLI | Inyección | Resultado esperado |
+| --- | --- | --- |
+| `nominal` | Ninguna | Todas las señales `VALID`; `SELF_TEST` en 1, `OPERATIONAL` de 2 a 41, `SHUTDOWN` en 42. |
+| `battery-fault` | Batería de 20 V en 5–6 | Gateway publica `INVALID`; Control está `DEGRADED` de 5 a 7. La batería vuelve a `VALID` en 7, comienza la confirmación y la operación se recupera en 8. |
+| `oil-fault` | Presión de aceite de −1 bar en 5 | Gateway publica `INVALID`; Control enclava `SAFE_STATE` en 5. La muestra vuelve a `VALID` en 6, pero el enclavamiento continúa hasta el apagado. |
+| `temperature-dropout` | Omite temperatura de 5 a 8 | Última recepción en 4: `VALID` retenida y operación degradada de 5 a 7; `MISSING` y `SAFE_STATE` en 8. Temperatura vuelve a `VALID` en 9 sin borrar la causa del ciclo 8. |
+| `faults` | Agenda combinada indicada abajo | Ejercita degradación, recuperación, caducidad y fallas posteriores a un enclavamiento. |
+
+En los recorridos críticos, `SHUTDOWN` conserva la causa original: ciclo 5 para `oil-fault`, 8 para `temperature-dropout` y 17 para `faults`. Las fallas no detienen la planta ni la publicación de los ciclos.
+
+La agenda combinada `faults` utiliza estos eventos:
+
+| Ciclos | Inyección | Comportamiento esperado |
+| --- | --- | --- |
+| 5 | Omite la batería | `DEGRADED` en 5 y 6; confirmación en 6 y `OPERATIONAL` en 7. |
+| 9–10 | Acelerador de 120 % | Gateway publica `INVALID`; `DEGRADED` de 9 a 11 y `OPERATIONAL` en 12. |
+| 14–17 | Omite las seis lecturas | `DEGRADED` de 14 a 16; en 17 caducan las muestras y Control enclava `SAFE_STATE`. Las lecturas vuelven en 18. |
+| 20 | Temperatura de 130 °C | Gateway publica `VALID`; Control detecta sobretemperatura. La causa enclavada sigue siendo la caducidad del ciclo 17. |
+| 42 | Solicitud de apagado del coordinador | `SHUTDOWN`, salida inhibida y causa original del ciclo 17. |
 
 ## Dashboard de terminal
 
@@ -237,7 +283,7 @@ El resultado de Gateway aparece bajo la columna `Gateway` de la tabla o el campo
 
 Las filas de señales caben en 80 columnas incluso con edad máxima de 64 bits. La presentación usa seis cifras significativas; si un valor excede los diez caracteres reservados, usa notación científica con dos decimales. Ese redondeo afecta solo al texto, no al valor conservado por Gateway.
 
-La sección de Control muestra el estado, la acción simulada y todos los diagnósticos del ciclo. La causa y el ciclo originales del enclavamiento aparecen por separado. En el ciclo 18 de `faults`, las señales recuperan su frescura y Control sigue en `SAFE_STATE` con la causa del ciclo 17. En el 20, la sobretemperatura aparece como diagnóstico activo junto a esa misma causa enclavada. Ambos formatos escriben un cuadro por ciclo en secuencia, sin códigos ANSI ni pausas.
+La sección de Control muestra el estado, la acción simulada y todos los diagnósticos del ciclo. La causa y el ciclo originales del enclavamiento aparecen por separado. En el ciclo 18 de `faults`, las señales recuperan su frescura y Control sigue en `SAFE_STATE` con la causa del ciclo 17. En el 20, la sobretemperatura aparece como diagnóstico activo junto a esa misma causa enclavada. El último cuadro muestra `SHUTDOWN` con salida inhibida y conserva esa misma causa enclavada. Ambos formatos escriben un cuadro por ciclo en secuencia, sin códigos ANSI ni pausas.
 
 ## Cobertura de pruebas
 
@@ -251,30 +297,39 @@ La sección de Control muestra el estado, la acción simulada y todos los diagn�
 | GW-06    | Publicar `VALID/INVALID/MISSING`, conservar la calidad al caducar y volver a evaluar cada nueva recepción.                                                                      | `gateway.status`            |
 | GW-07    | Aplicar el límite configurado a las seis señales, incluidos cero, frontera inclusiva, saltos y máximo de 64 bits.                                                              | `gateway.configurable_freshness` |
 | GW-08    | Conservar configuración y significado de instantáneas al modificar la configuración original, sustituir o destruir Gateway.                                                    | `gateway.configuration_ownership` |
-| CTRL-01  | Inhibir durante el arranque cuando faltan datos, operar al recibir un ciclo sano y detectar una falla crítica desde el primer ciclo.                                           | `control.startup`           |
+| CTRL-01  | Publicar el autoexamen inhibido antes de operar, supervisar la ventana de arranque y detectar una falla crítica desde el primer ciclo.                                           | `control.startup`           |
 | CTRL-02  | Limitar la operación ante un hallazgo degradante y exigir dos ciclos sanos consecutivos para recuperarse.                                                                      | `control.degradation`       |
 | CTRL-03  | Evaluar los límites de operación y distinguir la falta de una muestra de su caducidad.                                                                                         | `control.operating_limits`  |
 | CTRL-04  | Evaluar fallas simultáneas y resolver el enclavamiento con prioridad y desempate deterministas.                                                                                | `control.concurrent_faults` |
 | CTRL-05  | Retener la causa y el ciclo originales al inhibir en `SAFE_STATE`, y volver a `INIT` con un reinicio explícito.                                                                | `control.safe_latch`        |
 | CTRL-06  | Rechazar ciclos inválidos sin modificar el estado ni contar para la recuperación.                                                                                              | `control.cycle_order`       |
+| CTRL-07  | Mantener el autoexamen inhibido, resolver su ventana temporal y responder a fallas críticas o recuperación sin esperas reales.                                                  | `control.self_test`         |
+| CTRL-08  | Apagar desde todos los estados activos, conservar fallas simultáneas y enclavadas, rechazar eventos de ciclos inválidos y mantener el cierre terminal.                          | `control.shutdown`          |
 | SIM-01   | Producir lecturas nominales correlacionadas y rechazar pedales inválidos sin avanzar la planta.                                                                                | `simulation.nominal`        |
 | SIM-02   | Aplicar omisiones y reemplazos en sus intervalos exactos, conservar la trayectoria nominal y rechazar una agenda ambigua.                                                      | `simulation.fault_schedule` |
 | SIM-03   | Ejecutar el flujo completo por ciclo y reproducir los estados y diagnósticos de los recorridos nominal y con fallas.                                                           | `simulation.integration`    |
 | SIM-04   | Ejecutar el escenario con fallas desde la línea de comandos hasta completar el guion.                                                                                          | `simulation.cli_faults`     |
+| SIM-05   | Terminar recorridos de uno, dos y tres ciclos sin añadir lecturas, conservando una falla crítica que coincida con el apagado.                                                   | `simulation.lifecycle`      |
+| SIM-06   | Verificar y reproducir cada ciclo de batería inválida, aceite inválido y temperatura ausente/recuperada, con resultados de Gateway y decisiones de Control.                     | `simulation.acceptance`     |
+| CLI-01   | Completar el recorrido nominal con autoexamen y apagado desde la línea de comandos.                                                                                           | `simulation.cli_nominal`    |
+| CLI-02   | Ejecutar el escenario aislado de batería inválida desde la línea de comandos.                                                                                                 | `simulation.cli_battery_fault` |
+| CLI-03   | Ejecutar el escenario aislado de aceite inválido desde la línea de comandos.                                                                                                  | `simulation.cli_oil_fault`   |
+| CLI-04   | Ejecutar el escenario aislado de desaparición y recuperación de temperatura desde la línea de comandos.                                                                       | `simulation.cli_temperature_dropout` |
 | DASH-01  | Presentar resultado, calidad, frescura y edad independientes en ASCII y vista compacta, incluidos valores ausentes, no finitos y filas extremas de 80 columnas.                 | `dashboard.ascii`           |
 | DASH-02  | Dibujar ambos relojes braille y conservar la tabla de señales y el resultado de Control. Mostrar agujas solo para lecturas frescas y válidas.                                  | `dashboard.braille`         |
-| DASH-03  | Renderizar ambas vistas sobre la instantánea y el resultado del mismo ciclo durante el guion real, diferenciando diagnósticos activos y causa enclavada.                       | `dashboard.pipeline`        |
-| BUILD-01 | Propagar C++17 y enlace a un consumidor externo que solicita un estándar anterior, ejercitando también configuración y resultados públicos de Gateway.                          | `build.consumer`            |
+| DASH-03  | Renderizar ambas vistas sobre el mismo ciclo durante el guion real, diferenciando diagnóstico actual, causa enclavada y apagado.                       | `dashboard.pipeline`        |
+| DASH-04  | Presentar `INIT`, `SELF_TEST` y `SHUTDOWN` en ambas vistas con acción inhibida y causa enclavada conservada. | `dashboard.lifecycle` |
+| BUILD-01 | Propagar C++17 y enlace a un consumidor externo que solicita un estándar anterior; verificar Gateway, autoexamen, operación, apagado terminal y renderizado.                     | `build.consumer`            |
 
 ## Pruebas y CI
 
-La validación local, realizada desde directorios de compilación nuevos, AppleClang 21.0.0 y CMake 4.4.4, con advertencias tratadas como errores.
+La validación local registrada utiliza macOS 26.5 arm64, AppleClang 21.0.0 y CMake 4.4.4, desde directorios de compilación nuevos y con advertencias tratadas como errores.
 
 | Configuración | Resultado local |
 | --- | --- |
-| Debug | 22/22 pruebas CTest aprobadas. |
-| Release, benchmark compilado | 22/22 pruebas CTest aprobadas. |
-| Debug con AddressSanitizer y UndefinedBehaviorSanitizer | 22/22 pruebas CTest aprobadas. |
+| Debug | 31/31 pruebas CTest aprobadas. |
+| Release, benchmark compilado | 31/31 pruebas CTest aprobadas. |
+| Debug con AddressSanitizer y UndefinedBehaviorSanitizer | 31/31 pruebas CTest aprobadas. |
 
 Para reproducir estas configuraciones desde la raíz del proyecto:
 
@@ -295,7 +350,9 @@ cmake --build build/sanitizers --parallel
 
 Estos flags corresponden a Clang/GCC en un shell POSIX; el workflow utiliza las opciones adecuadas de CMake para MSVC. Para ejecutar solo las pruebas de Gateway en Debug: `(cd build/debug && ctest -R '^gateway\.' --output-on-failure)`.
 
-La prueba `build.consumer` crea un proyecto externo que solicita C++11, incluye las seis cabeceras públicas y enlaza las bibliotecas. CMake eleva su estándar a C++17 mediante el requisito público del target. El consumidor verifica una Gateway con límite cero, conserva una instantánea válida tras la caducidad posterior y ejecuta un escenario con renderizado.
+Para verificar las transiciones de Control: `(cd build/debug && ctest -R '^control\.' --output-on-failure)`. Para los escenarios de aceptación: `(cd build/debug && ctest -R '^simulation\.acceptance$' --output-on-failure)`.
+
+La prueba `build.consumer` crea un proyecto externo que solicita C++11, incluye las seis cabeceras públicas y enlaza las bibliotecas. CMake eleva su estándar a C++17 mediante el requisito público del target. El consumidor verifica una Gateway con límite cero, conserva una instantánea válida tras la caducidad posterior y comprueba un escenario de tres ciclos con `SELF_TEST → OPERATIONAL → SHUTDOWN` y renderizado. También utiliza directamente el evento de apagado y comprueba su cierre terminal.
 
 La línea base previa fue revisada con Cppcheck 2.22.0 sobre `src/` y `benchmarks/`, sin diagnósticos de tipo warning, performance o portability.
 
@@ -305,7 +362,7 @@ El [workflow de CI](.github/workflows/ci.yml) configura compilación y pruebas e
 
 El benchmark mide por separado el núcleo y los formatos ASCII y braille del Dashboard con el escenario `faults`. Para compilar el instrumento de medición, habilita `ECU_BUILD_BENCHMARKS=ON` en Release.
 
-Las muestras bajo `benchmarks/results/` corresponden a la versión previa del Dashboard.
+Las muestras bajo `benchmarks/results/` son históricas: corresponden a una versión anterior del Dashboard y del ciclo de vida de Control. No describen el costo del autoexamen ni del apagado actuales.
 
 ## Alcance
 

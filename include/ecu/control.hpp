@@ -10,9 +10,16 @@ namespace ecu {
 
 enum class ControlState {
     init,
+    self_test,
     operational,
     degraded,
     safe_state,
+    shutdown,
+};
+
+enum class ControlEvent {
+    none,
+    shutdown,
 };
 
 enum class ControlAction {
@@ -78,10 +85,15 @@ struct ControlResult {
 
 class ControlECU {
 public:
-    // El ciclo debe ser mayor que el último aceptado. La instantánea se usa solo en esta llamada.
-    [[nodiscard]] std::optional<ControlResult> step(const SignalSnapshot& snapshot) noexcept;
+    // Arranca en INIT; el primer ciclo no crítico publica SELF_TEST antes de operar.
+    [[nodiscard]] ControlState state() const noexcept { return state_; }
 
-    // Rearma SAFE_STATE para un nuevo arranque, conservando el orden de ciclos.
+    // Ciclos crecientes; SHUTDOWN es terminal. El evento solo actúa en un ciclo aceptado.
+    // El apagado conserva diagnósticos actuales y la primera causa crítica enclavada.
+    [[nodiscard]] std::optional<ControlResult> step(
+        const SignalSnapshot& snapshot, ControlEvent event = ControlEvent::none) noexcept;
+
+    // Solo rearma SAFE_STATE: vuelve a INIT y conserva el orden de ciclos.
     [[nodiscard]] bool reset() noexcept;
 
 private:

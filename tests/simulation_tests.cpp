@@ -76,9 +76,13 @@ void nominal()
     const bool finished = runScenario(*scenario, [&](const SignalSnapshot& snapshot, const ControlResult& result) {
         ++observed;
         require(snapshot.cycle() == observed && result.cycle == observed, "Gateway and Control must share each tick");
-        require(result.state == ControlState::operational && result.action == ControlAction::normal_operation &&
+        const auto expectedState = observed == 1 ? ControlState::self_test
+            : observed == scenario->cycles() ? ControlState::shutdown : ControlState::operational;
+        const auto expectedAction = expectedState == ControlState::operational
+            ? ControlAction::normal_operation : ControlAction::inhibit_output;
+        require(result.state == expectedState && result.action == expectedAction &&
                     result.diagnostics.size() == 0 && !result.latchedFault,
-                "a nominal drive must remain operational");
+                "a nominal drive must self-test, operate and shut down in order");
         for (const auto& descriptor : signalCatalog) {
             require(std::isfinite(freshValue(snapshot, descriptor.id)), "every nominal signal must be finite");
         }
@@ -293,11 +297,15 @@ void integration()
         }
 
         if (cycle >= 17) {
-            require(result.state == ControlState::safe_state && result.action == ControlAction::inhibit_output &&
+            const auto expectedState = cycle == scenario->cycles() ? ControlState::shutdown : ControlState::safe_state;
+            require(result.state == expectedState && result.action == ControlAction::inhibit_output &&
                         result.latchedFault && result.latchedFault->cycle == 17,
                     "the first critical expiry must inhibit operation and stay latched");
             const Diagnostic expiry{DiagnosticCode::signal_expired, Severity::critical, SignalId::coolant_temperature};
             require(sameDiagnostic(result.latchedFault->cause, expiry), "the original cause must survive the rest of the drive");
+        } else if (cycle == 1) {
+            require(result.state == ControlState::self_test && result.action == ControlAction::inhibit_output,
+                    "the first healthy driving tick must expose the self-test");
         } else if (cycle == 5 || cycle == 6 || (cycle >= 9 && cycle <= 11) || (cycle >= 14 && cycle <= 16)) {
             require(result.state == ControlState::degraded && result.action == ControlAction::limited_operation,
                     "temporary losses and invalid noncritical samples must degrade operation");
@@ -338,15 +346,178 @@ void integration()
     require(reran && repeated == trace.size(), "running the same script twice must reproduce every tick");
 }
 
+void lifecycle()
+{
+    for (const Cycle length : std::array<Cycle, 3>{1, 2, 3}) {
+        Scenario scenario;
+        require(scenario.addDriveSegment(length, 0.0), "a short driving schedule must be accepted");
+        Cycle seen = 0;
+        const bool completed = runScenario(scenario, [&](const SignalSnapshot& snapshot, const ControlResult& result) {
+            ++seen;
+            require(snapshot.cycle() == seen && result.cycle == seen,
+                    "the final shutdown must use the current Gateway cycle");
+            const auto expected = seen == length ? ControlState::shutdown
+                : seen == 1 ? ControlState::self_test : ControlState::operational;
+            require(result.state == expected && !result.latchedFault && result.diagnostics.size() == 0,
+                    "short runs must shut down exactly once at their declared last cycle");
+            require(result.action == (expected == ControlState::operational
+                        ? ControlAction::normal_operation : ControlAction::inhibit_output),
+                    "self-test and shutdown must inhibit output");
+        });
+        require(completed && seen == length, "shutdown must neither skip nor append a driving cycle");
+    }
+
+    Scenario faultAtShutdown;
+    require(faultAtShutdown.addDriveSegment(1, 0.0) &&
+                faultAtShutdown.addFault({SignalId::oil_pressure, 1, 1, -1.0}),
+            "the final cycle may also contain a critical measurement");
+    Cycle observed = 0;
+    require(runScenario(faultAtShutdown, [&](const SignalSnapshot& snapshot, const ControlResult& result) {
+        ++observed;
+        require(snapshot.cycle() == 1 && result.cycle == 1 && result.state == ControlState::shutdown &&
+                    result.action == ControlAction::inhibit_output && result.latchedFault &&
+                    result.latchedFault->cycle == 1,
+                "shutdown must preserve a critical cause detected in the same cycle");
+        expectDiagnostic(result, DiagnosticCode::signal_out_of_range, Severity::critical, SignalId::oil_pressure);
+    }) && observed == 1, "a one-cycle fault run must finish with its evidence intact");
+
+    require(!makeScenario(static_cast<ScenarioKind>(255)), "an unknown scenario kind must be rejected");
+}
+
+void acceptance()
+{
+    struct ExpectedInterval {
+        Cycle first;
+        Cycle last;
+        ControlState state;
+    };
+    struct AcceptanceCase {
+        ScenarioKind kind;
+        SignalId signal;
+        Cycle latchAt;
+        DiagnosticCode cause;
+        std::array<ExpectedInterval, 5> intervals;
+    };
+    const std::array<AcceptanceCase, 3> cases{{
+        {ScenarioKind::battery_fault, SignalId::battery_voltage, 0, DiagnosticCode::signal_out_of_range,
+         {{{1, 1, ControlState::self_test}, {2, 4, ControlState::operational},
+           {5, 7, ControlState::degraded}, {8, 41, ControlState::operational},
+           {42, 42, ControlState::shutdown}}}},
+        {ScenarioKind::oil_fault, SignalId::oil_pressure, 5, DiagnosticCode::signal_out_of_range,
+         {{{1, 1, ControlState::self_test}, {2, 4, ControlState::operational},
+           {5, 5, ControlState::safe_state}, {6, 41, ControlState::safe_state},
+           {42, 42, ControlState::shutdown}}}},
+        {ScenarioKind::temperature_dropout, SignalId::coolant_temperature, 8, DiagnosticCode::signal_expired,
+         {{{1, 1, ControlState::self_test}, {2, 4, ControlState::operational},
+           {5, 7, ControlState::degraded}, {8, 41, ControlState::safe_state},
+           {42, 42, ControlState::shutdown}}}},
+    }};
+
+    for (const auto& test : cases) {
+        const auto scenario = makeScenario(test.kind);
+        require(scenario && scenario->cycles() == 42, "acceptance runs must use the full driving schedule");
+        std::array<std::optional<Tick>, 42> trace{};
+        VehicleSimulator reference;
+        Cycle seen = 0;
+        const bool completed = runScenario(*scenario, [&](const SignalSnapshot& snapshot, const ControlResult& result) {
+            ++seen;
+            require(seen <= trace.size() && snapshot.cycle() == seen && result.cycle == seen,
+                    "every acceptance tick must share its cycle through Gateway and Control");
+            trace[static_cast<std::size_t>(seen - 1)] = Tick{snapshot, result};
+            const auto pedal = scenario->throttleAt(seen);
+            require(pedal.has_value(), "an acceptance tick must have a pedal setting");
+            const auto nominal = reference.step(*pedal);
+            require(nominal.has_value(), "the reference plant must advance through the same drive");
+
+            bool matched = false;
+            for (const auto& interval : test.intervals) {
+                if (seen >= interval.first && seen <= interval.last) {
+                    matched = true;
+                    require(result.state == interval.state, "acceptance run entered an unexpected Control state");
+                    const auto action = interval.state == ControlState::operational ? ControlAction::normal_operation
+                        : interval.state == ControlState::degraded ? ControlAction::limited_operation
+                        : ControlAction::inhibit_output;
+                    require(result.action == action, "the state must publish its expected simulated action");
+                }
+            }
+            require(matched, "the expected trace must cover every driving cycle");
+            if (test.latchAt != 0 && seen >= test.latchAt) {
+                require(result.latchedFault && result.latchedFault->cycle == test.latchAt &&
+                            result.latchedFault->cause.code == test.cause &&
+                            result.latchedFault->cause.severity == Severity::critical &&
+                            result.latchedFault->cause.signal == test.signal,
+                        "the first critical cause must survive signal recovery and final shutdown");
+            } else {
+                require(!result.latchedFault, "healthy and noncritical runs must not latch a critical fault");
+            }
+
+            for (const auto& descriptor : signalCatalog) {
+                if (descriptor.id != test.signal) {
+                    const auto unaffected = observationOf(snapshot, descriptor.id);
+                    require(unaffected.status == SignalStatus::valid &&
+                                unaffected.freshness == Freshness::fresh && unaffected.age == 0,
+                            "a single-signal fault must leave every other channel valid and current");
+                }
+            }
+            const auto focus = observationOf(snapshot, test.signal);
+            if (test.kind == ScenarioKind::battery_fault && (seen == 5 || seen == 6)) {
+                require(focus.status == SignalStatus::invalid && focus.sample && focus.sample->value == 20.0 &&
+                            focus.sample->quality == SampleQuality::out_of_range && focus.age == 0,
+                        "battery injection must remain INVALID while Control degrades");
+                expectDiagnostic(result, DiagnosticCode::signal_out_of_range, Severity::degraded, test.signal);
+            } else if (test.kind == ScenarioKind::oil_fault && seen == 5) {
+                require(focus.status == SignalStatus::invalid && focus.sample && focus.sample->value == -1.0 &&
+                            focus.sample->quality == SampleQuality::out_of_range && focus.age == 0,
+                        "oil injection must remain INVALID while Control enters its safe state");
+                expectDiagnostic(result, DiagnosticCode::signal_out_of_range, Severity::critical, test.signal);
+            } else if (test.kind == ScenarioKind::temperature_dropout && seen >= 5 && seen <= 8) {
+                const bool expired = seen == 8;
+                require(focus.status == (expired ? SignalStatus::missing : SignalStatus::valid) &&
+                            focus.freshness == (expired ? Freshness::expired : Freshness::retained) &&
+                            focus.age == seen - 4 && focus.sample && focus.sample->receivedAt == 4 &&
+                            focus.sample->quality == SampleQuality::in_range,
+                        "temperature omission must age the original sample and become MISSING only after the limit");
+                expectDiagnostic(result, expired ? DiagnosticCode::signal_expired : DiagnosticCode::signal_retained,
+                                 expired ? Severity::critical : Severity::degraded, test.signal);
+            } else {
+                require(focus.status == SignalStatus::valid && focus.freshness == Freshness::fresh && focus.age == 0,
+                        "a signal outside its injection interval must be reevaluated as VALID");
+                const double physical = test.kind == ScenarioKind::battery_fault ? nominal->batteryVoltage
+                    : test.kind == ScenarioKind::oil_fault ? nominal->oilPressureBar : nominal->coolantTemperatureC;
+                require(focus.sample && focus.sample->value == physical,
+                        "the recovered signal must follow the unmodified plant trajectory");
+            }
+            if (test.kind == ScenarioKind::battery_fault && seen == 7) {
+                expectDiagnostic(result, DiagnosticCode::recovery_pending, Severity::degraded);
+            }
+            if ((test.kind == ScenarioKind::battery_fault && seen == 8) ||
+                (test.kind == ScenarioKind::oil_fault && seen == 6) ||
+                (test.kind == ScenarioKind::temperature_dropout && seen == 9)) {
+                require(result.diagnostics.size() == 0, "recovered inputs must clear current diagnostics");
+            }
+        });
+        require(completed && seen == trace.size(), "every acceptance run must complete without real-time waits");
+
+        std::size_t repeated = 0;
+        require(runScenario(*scenario, [&](const SignalSnapshot& snapshot, const ControlResult& result) {
+            require(repeated < trace.size() && trace[repeated], "the repeated run must keep its length");
+            expectSameTick(*trace[repeated], snapshot, result);
+            ++repeated;
+        }) && repeated == trace.size(), "acceptance traces must reproduce all measurements and decisions");
+    }
+}
+
 struct TestCase {
     std::string_view name;
     void (*run)();
 };
 
-constexpr std::array<TestCase, 3> cases{{
+constexpr std::array<TestCase, 5> cases{{
     {"nominal", nominal},
     {"fault_schedule", faultSchedule},
     {"integration", integration},
+    {"lifecycle", lifecycle},
+    {"acceptance", acceptance},
 }};
 
 }  // namespace

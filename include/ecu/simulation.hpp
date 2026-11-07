@@ -6,6 +6,7 @@
 namespace ecu {
 
 // El observador recibe datos del mismo ciclo válidos durante la llamada.
+// El último ciclo declarado solicita el apagado de Control, sin añadir otro ciclo.
 template <typename Observer>
 [[nodiscard]] bool runScenario(const Scenario& scenario, Observer&& observe)
 {
@@ -37,7 +38,8 @@ template <typename Observer>
         if (!snapshot) {
             return false;
         }
-        const auto result = control.step(*snapshot);
+        const auto event = cycle == lastCycle ? ControlEvent::shutdown : ControlEvent::none;
+        const auto result = control.step(*snapshot, event);
         if (!result) {
             return false;
         }

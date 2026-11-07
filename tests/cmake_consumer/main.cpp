@@ -6,6 +6,7 @@
 #include "ecu/simulator.hpp"
 
 #include <cstdlib>
+#include <cstddef>
 #include <sstream>
 
 int main()
@@ -26,15 +27,31 @@ int main()
     }
 
     ecu::Scenario scenario;
-    if (!scenario.addDriveSegment(1, 0.0)) {
+    if (!scenario.addDriveSegment(3, 0.0)) {
         return EXIT_FAILURE;
     }
 
     std::ostringstream output;
-    bool rendered = false;
+    bool rendered = true;
+    std::size_t seen = 0;
+    bool lifecycleMatches = true;
     const bool completed = ecu::runScenario(scenario, [&](const ecu::SignalSnapshot& snapshot,
                                                          const ecu::ControlResult& control) {
-        rendered = ecu::renderDashboard(output, snapshot, control, ecu::DashboardFormat::ascii);
+        ++seen;
+        rendered = ecu::renderDashboard(output, snapshot, control, ecu::DashboardFormat::ascii) && rendered;
+        const auto expected = seen == 1 ? ecu::ControlState::self_test
+            : seen == 2 ? ecu::ControlState::operational : ecu::ControlState::shutdown;
+        lifecycleMatches = lifecycleMatches && control.state == expected && snapshot.cycle() == seen &&
+            control.cycle == seen;
     });
-    return completed && rendered && !output.str().empty() ? EXIT_SUCCESS : EXIT_FAILURE;
+    ecu::ControlECU terminal;
+    if (terminal.state() != ecu::ControlState::init) {
+        return EXIT_FAILURE;
+    }
+    const auto stopped = terminal.step(*received, ecu::ControlEvent::shutdown);
+    if (!stopped || stopped->state != ecu::ControlState::shutdown || terminal.reset() || terminal.step(*expired)) {
+        return EXIT_FAILURE;
+    }
+    return completed && rendered && lifecycleMatches && seen == 3 && !output.str().empty()
+        ? EXIT_SUCCESS : EXIT_FAILURE;
 }

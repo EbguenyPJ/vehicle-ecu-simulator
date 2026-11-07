@@ -15,7 +15,9 @@
 
 namespace {
 
-constexpr std::string_view usage = "Uso: vehicle-ecu-simulator [nominal|faults] [--dashboard auto|ascii|braille]\n";
+constexpr std::string_view usage =
+    "Uso: vehicle-ecu-simulator [nominal|faults|battery-fault|oil-fault|temperature-dropout] "
+    "[--dashboard auto|ascii|braille]\n";
 
 struct Options {
     ecu::ScenarioKind scenario{ecu::ScenarioKind::nominal};
@@ -42,8 +44,20 @@ std::optional<Options> parseOptions(int argc, char* argv[])
             } else if (format != "auto") {
                 return std::nullopt;
             }
-        } else if (!scenarioSeen && (arg == "nominal" || arg == "faults")) {
-            options.scenario = arg == "faults" ? ecu::ScenarioKind::faults : ecu::ScenarioKind::nominal;
+        } else if (!scenarioSeen) {
+            if (arg == "nominal") {
+                options.scenario = ecu::ScenarioKind::nominal;
+            } else if (arg == "faults") {
+                options.scenario = ecu::ScenarioKind::faults;
+            } else if (arg == "battery-fault") {
+                options.scenario = ecu::ScenarioKind::battery_fault;
+            } else if (arg == "oil-fault") {
+                options.scenario = ecu::ScenarioKind::oil_fault;
+            } else if (arg == "temperature-dropout") {
+                options.scenario = ecu::ScenarioKind::temperature_dropout;
+            } else {
+                return std::nullopt;
+            }
             scenarioSeen = true;
         } else {
             return std::nullopt;

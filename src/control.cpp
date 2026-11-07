@@ -25,7 +25,9 @@ ControlAction actionFor(ControlState state) noexcept
     case ControlState::degraded:
         return ControlAction::limited_operation;
     case ControlState::init:
+    case ControlState::self_test:
     case ControlState::safe_state:
+    case ControlState::shutdown:
         return ControlAction::inhibit_output;
     }
     return ControlAction::inhibit_output;
@@ -67,17 +69,14 @@ Diagnostics ControlECU::evaluate(const SignalSnapshot& snapshot, bool waitingFor
         const bool critical = id == SignalId::coolant_temperature || id == SignalId::oil_pressure;
         const auto severity = critical ? Severity::critical : Severity::degraded;
 
-        if (!observation || !observation->sample) {
-            diagnostics.add(DiagnosticCode::signal_missing,
-                            waitingForStartup ? Severity::degraded : severity, id);
-            continue;
-        }
-        if (observation->freshness == Freshness::expired) {
-            diagnostics.add(DiagnosticCode::signal_expired, severity, id);
+        if (!observation || observation->status == SignalStatus::missing) {
+            const bool neverReceived = !observation || !observation->sample;
+            diagnostics.add(neverReceived ? DiagnosticCode::signal_missing : DiagnosticCode::signal_expired,
+                            neverReceived && waitingForStartup ? Severity::degraded : severity, id);
             continue;
         }
         const auto& sample = *observation->sample;
-        if (sample.quality != SampleQuality::in_range) {
+        if (observation->status == SignalStatus::invalid) {
             const auto code = sample.quality == SampleQuality::non_finite
                 ? DiagnosticCode::signal_non_finite : DiagnosticCode::signal_out_of_range;
             diagnostics.add(code, severity, id);
@@ -131,18 +130,19 @@ Diagnostics ControlECU::evaluate(const SignalSnapshot& snapshot, bool waitingFor
     return diagnostics;
 }
 
-std::optional<ControlResult> ControlECU::step(const SignalSnapshot& snapshot) noexcept
+std::optional<ControlResult> ControlECU::step(const SignalSnapshot& snapshot, ControlEvent event) noexcept
 {
     const Cycle cycle = snapshot.cycle();
-    if (cycle <= lastCycle_) {
+    if (state_ == ControlState::shutdown || cycle <= lastCycle_) {
         return std::nullopt;
     }
 
-    if (state_ == ControlState::init && startupCycle_ == 0) {
+    if (state_ == ControlState::init) {
         startupCycle_ = cycle;
     }
     const bool waitingForStartup =
-        state_ == ControlState::init && cycle - startupCycle_ < startupGraceCycles;
+        (state_ == ControlState::init || state_ == ControlState::self_test) &&
+        cycle - startupCycle_ < startupGraceCycles;
     auto diagnostics = evaluate(snapshot, waitingForStartup);
     const auto primary = diagnostics.primary();
     const bool healthy = !primary.has_value();
@@ -152,6 +152,9 @@ std::optional<ControlResult> ControlECU::step(const SignalSnapshot& snapshot) no
         if (primary && primary->severity == Severity::critical) {
             state_ = ControlState::safe_state;
             latchedFault_ = LatchedFault{cycle, *primary};
+        } else if (state_ == ControlState::init) {
+            // El autoexamen es observable antes de habilitar cualquier operación.
+            state_ = ControlState::self_test;
         } else if (healthy) {
             if (state_ == ControlState::degraded && !confirmedRecovery) {
                 diagnostics.add(DiagnosticCode::recovery_pending, Severity::degraded);
@@ -161,6 +164,10 @@ std::optional<ControlResult> ControlECU::step(const SignalSnapshot& snapshot) no
         } else if (!waitingForStartup) {
             state_ = ControlState::degraded;
         }
+    }
+
+    if (event == ControlEvent::shutdown) {
+        state_ = ControlState::shutdown;
     }
 
     lastCycle_ = cycle;

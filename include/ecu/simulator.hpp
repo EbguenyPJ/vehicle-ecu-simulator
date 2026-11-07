@@ -65,6 +65,9 @@ private:
 enum class ScenarioKind {
     nominal,
     faults,
+    battery_fault,
+    oil_fault,
+    temperature_dropout,
 };
 
 [[nodiscard]] std::optional<Scenario> makeScenario(ScenarioKind kind) noexcept;

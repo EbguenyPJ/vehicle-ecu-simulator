@@ -57,7 +57,8 @@ if(BUILD_TESTING)
     target_link_libraries(control_tests PRIVATE ecu_control)
     ecu_enable_warnings(control_tests)
 
-    foreach(test_case IN ITEMS startup degradation operating_limits concurrent_faults safe_latch cycle_order)
+    foreach(test_case IN ITEMS startup degradation operating_limits concurrent_faults safe_latch cycle_order
+                               self_test shutdown)
         add_test(NAME control.${test_case} COMMAND control_tests ${test_case})
     endforeach()
 
@@ -65,19 +66,22 @@ if(BUILD_TESTING)
     target_link_libraries(simulation_tests PRIVATE ecu_simulator ecu_control)
     ecu_enable_warnings(simulation_tests)
 
-    foreach(test_case IN ITEMS nominal fault_schedule integration)
+    foreach(test_case IN ITEMS nominal fault_schedule integration lifecycle acceptance)
         add_test(NAME simulation.${test_case} COMMAND simulation_tests ${test_case})
+        set_tests_properties(simulation.${test_case} PROPERTIES TIMEOUT 10)
     endforeach()
 
-    add_test(NAME simulation.cli_faults COMMAND vehicle-ecu-simulator faults)
-    set_tests_properties(simulation.nominal simulation.integration simulation.cli_faults
-                         PROPERTIES TIMEOUT 10)
+    foreach(scenario IN ITEMS nominal faults battery-fault oil-fault temperature-dropout)
+        string(REPLACE "-" "_" test_suffix "${scenario}")
+        add_test(NAME simulation.cli_${test_suffix} COMMAND vehicle-ecu-simulator ${scenario})
+        set_tests_properties(simulation.cli_${test_suffix} PROPERTIES TIMEOUT 10)
+    endforeach()
 
     add_executable(dashboard_tests tests/dashboard_tests.cpp)
     target_link_libraries(dashboard_tests PRIVATE ecu_dashboard ecu_simulator)
     ecu_enable_warnings(dashboard_tests)
 
-    foreach(test_case IN ITEMS ascii braille pipeline)
+    foreach(test_case IN ITEMS ascii braille pipeline lifecycle)
         add_test(NAME dashboard.${test_case} COMMAND dashboard_tests ${test_case})
     endforeach()
 

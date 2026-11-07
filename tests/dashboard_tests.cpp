@@ -96,11 +96,12 @@ struct Tick {
     ControlResult result;
 };
 
-Tick process(Gateway& gateway, ControlECU& control, Cycle cycle, const SignalBatch& batch)
+Tick process(Gateway& gateway, ControlECU& control, Cycle cycle, const SignalBatch& batch,
+             ControlEvent event = ControlEvent::none)
 {
     const auto snapshot = gateway.processCycle(cycle, batch);
     require(snapshot.has_value(), "Gateway must publish an increasing cycle");
-    const auto result = control.step(*snapshot);
+    const auto result = control.step(*snapshot, event);
     require(result.has_value(), "Control must process the published cycle");
     return {*snapshot, *result};
 }
@@ -250,7 +251,7 @@ void braille()
     require(!arc.empty(), "even without a reading, the Braille dial arcs must be visible");
     expectText(empty, "VELOCIDAD");
     expectText(empty, "RPM");
-    expectText(empty, "Control: INIT");
+    expectText(empty, "Control: SELF_TEST");
     expectText(empty, "Accion: INHIBIR");
     expectSignal(empty, "Velocidad", "MISSING", "SIN_MUESTRA", "NO_RECIBIDA", "-");
 
@@ -311,8 +312,8 @@ void pipeline()
                 "both Dashboard formats must show the same data at every cycle");
 
         if (observed == 1) {
-            expectText(table, "Control: OPERATIONAL");
-            expectText(table, "Accion: NORMAL");
+            expectText(table, "Control: SELF_TEST");
+            expectText(table, "Accion: INHIBIR");
         } else if (observed == 5) {
             expectSignal(table, "Bateria", "VALID", "VALIDA", "RETENIDA", "1");
             expectText(table, "Control: DEGRADED");
@@ -343,7 +344,7 @@ void pipeline()
         }
 
         if (observed >= 17) {
-            expectText(table, "Control: SAFE_STATE");
+            expectText(table, observed == scenario->cycles() ? "Control: SHUTDOWN" : "Control: SAFE_STATE");
             expectText(table, "Accion: INHIBIR");
             expectText(table, "Causa enclavada: SENAL_CADUCADA [Temperatura]");
             expectText(table, "Ciclo de enclavamiento: 17");
@@ -355,6 +356,51 @@ void pipeline()
             "the Dashboard must receive every cycle of the real fault scenario");
 }
 
+void lifecycle()
+{
+    Gateway gateway;
+    ControlECU control;
+    ControlResult initial;
+    initial.state = control.state();
+    for (const auto format : {DashboardFormat::ascii, DashboardFormat::braille}) {
+        const auto frame = render(gateway.snapshot(), initial, format);
+        expectText(frame, "Control: INIT");
+        expectText(frame, "Accion: INHIBIR");
+    }
+
+    auto healthy = auxiliaryReadings();
+    healthy.add(SignalId::speed, 40.0);
+    healthy.add(SignalId::engine_rpm, 1800.0);
+    const auto selfTest = process(gateway, control, 1, healthy);
+    for (const auto format : {DashboardFormat::ascii, DashboardFormat::braille}) {
+        const auto frame = render(selfTest.snapshot, selfTest.result, format);
+        expectText(frame, "Control: SELF_TEST");
+        expectText(frame, "Accion: INHIBIR");
+        expectText(frame, "Diagnostico actual: NINGUNO");
+    }
+    const auto running = process(gateway, control, 2, healthy);
+    expectText(render(running.snapshot, running.result, DashboardFormat::ascii), "Control: OPERATIONAL");
+
+    SignalBatch critical;
+    critical.add(SignalId::coolant_temperature, 151.0);
+    const auto fault = process(gateway, control, 3, critical);
+    require(fault.result.latchedFault && fault.result.latchedFault->cycle == 3,
+            "the shutdown presentation needs an actual latched fault");
+    const auto shutdown = process(gateway, control, 4, healthy, ControlEvent::shutdown);
+    for (const auto format : {DashboardFormat::ascii, DashboardFormat::braille}) {
+        const auto frame = render(shutdown.snapshot, shutdown.result, format);
+        expectText(frame, "Control: SHUTDOWN");
+        expectText(frame, "Accion: INHIBIR");
+        expectText(frame, "Diagnostico actual: NINGUNO");
+        expectText(frame, "Causa enclavada: MEDICION_FUERA_RANGO [Temperatura]");
+        expectText(frame, "Ciclo de enclavamiento: 3");
+        expectSignal(frame, "Temperatura", "VALID", "VALIDA", "FRESCA", "0");
+    }
+    require(shutdown.result.latchedFault && shutdown.result.latchedFault->cycle == 3 &&
+                shutdown.result.state == ControlState::shutdown,
+            "rendering must leave shutdown and its original fault unchanged");
+}
+
 struct TestCase {
     std::string_view name;
     void (*run)();
@@ -364,6 +410,7 @@ constexpr std::array cases{
     TestCase{"ascii", ascii},
     TestCase{"braille", braille},
     TestCase{"pipeline", pipeline},
+    TestCase{"lifecycle", lifecycle},
 };
 
 }  // namespace

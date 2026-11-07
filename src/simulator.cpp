@@ -132,6 +132,21 @@ std::optional<Scenario> makeScenario(ScenarioKind kind) noexcept
     switch (kind) {
     case ScenarioKind::nominal:
         return scenario;
+    case ScenarioKind::battery_fault:
+        if (!scenario.addFault({SignalId::battery_voltage, 5, 6, 20.0})) {
+            return std::nullopt;
+        }
+        return scenario;
+    case ScenarioKind::oil_fault:
+        if (!scenario.addFault({SignalId::oil_pressure, 5, 5, -1.0})) {
+            return std::nullopt;
+        }
+        return scenario;
+    case ScenarioKind::temperature_dropout:
+        if (!scenario.addFault({SignalId::coolant_temperature, 5, 8, std::nullopt})) {
+            return std::nullopt;
+        }
+        return scenario;
     case ScenarioKind::faults:
         if (!scenario.addFault({SignalId::battery_voltage, 5, 5, std::nullopt}) ||
             !scenario.addFault({SignalId::throttle_position, 9, 10, 120.0}) ||

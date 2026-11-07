@@ -66,9 +66,11 @@ std::string_view stateName(ControlState state) noexcept
 {
     switch (state) {
     case ControlState::init: return "INIT";
+    case ControlState::self_test: return "SELF_TEST";
     case ControlState::operational: return "OPERATIONAL";
     case ControlState::degraded: return "DEGRADED";
     case ControlState::safe_state: return "SAFE_STATE";
+    case ControlState::shutdown: return "SHUTDOWN";
     }
     return "DESCONOCIDO";
 }
