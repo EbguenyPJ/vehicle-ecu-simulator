@@ -34,6 +34,13 @@ add_executable(vehicle-ecu-simulator src/main.cpp)
 target_link_libraries(vehicle-ecu-simulator PRIVATE ecu_simulator ecu_dashboard)
 ecu_enable_warnings(vehicle-ecu-simulator)
 
+option(ECU_BUILD_BENCHMARKS "Build the reproducible core and Dashboard benchmark" OFF)
+if(ECU_BUILD_BENCHMARKS)
+    add_executable(ecu-performance benchmarks/performance.cpp)
+    target_link_libraries(ecu-performance PRIVATE ecu_simulator ecu_dashboard)
+    ecu_enable_warnings(ecu-performance)
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(gateway_tests tests/gateway_tests.cpp)

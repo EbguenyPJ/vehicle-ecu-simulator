@@ -176,6 +176,10 @@ El escenario predeterminado es `nominal` y el formato predeterminado es `auto`. 
 
 El ejecutable devuelve 0 cuando completa el guion, incluso si el escenario activa `SAFE_STATE`. Con un generador multiconfiguración, usa el ejecutable de la configuración compilada, por ejemplo `build/Debug/vehicle-ecu-simulator`.
 
+## Rendimiento
+
+El benchmark mide por separado el núcleo y los dos formatos del Dashboard con el escenario `faults`. El benchmark opcional se habilita con `ECU_BUILD_BENCHMARKS=ON` en Release.
+
 ## Alcance actual
 
 El entregable incluye el simulador, Gateway, Control, el coordinador de escenarios, el Dashboard de terminal y sus pruebas en CTest. El ciclo representa tiempo simulado y las acciones de Control se publican como parte de su resultado. La cadencia física de muestreo y cualquier adaptador de bus requieren contratos propios.

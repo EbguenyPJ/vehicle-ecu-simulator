@@ -168,10 +168,8 @@ void writeCentered(std::ostream& out, std::string_view text)
     out << spaces.substr(0, left) << text << spaces.substr(0, padding - left);
 }
 
-void writeScale(std::ostream& out, const SignalDescriptor& scale)
+void writeScale(std::ostream& out, std::string_view minimum, std::string_view maximum)
 {
-    const auto minimum = formatValue(scale.minimum);
-    const auto maximum = formatValue(scale.maximum);
     static_assert(2 * columnWidths[1] < detail::brailleDialWidth);
     out << minimum << spaces.substr(0, detail::brailleDialWidth - minimum.size() - maximum.size()) << maximum;
 }
@@ -184,6 +182,11 @@ void writeDials(std::ostream& out, const SignalSnapshot& snapshot)
     const auto rpm = dialValue(snapshot, SignalId::engine_rpm);
     const auto& speedScale = signalCatalog[speedIndex];
     const auto& rpmScale = signalCatalog[rpmIndex];
+    // Los límites del catálogo inmutable se formatean una sola vez.
+    static const auto speedMinimum = formatValue(speedScale.minimum);
+    static const auto speedMaximum = formatValue(speedScale.maximum);
+    static const auto rpmMinimum = formatValue(rpmScale.minimum);
+    static const auto rpmMaximum = formatValue(rpmScale.maximum);
     const auto fraction = [](const std::optional<double>& value, const SignalDescriptor& scale)
         -> std::optional<double> {
         if (!value) {
@@ -202,9 +205,9 @@ void writeDials(std::ostream& out, const SignalSnapshot& snapshot)
     for (std::size_t row = 0; row < detail::brailleDialHeight; ++row) {
         out << speedDial[row] << gap << rpmDial[row] << '\n';
     }
-    writeScale(out, speedScale);
+    writeScale(out, speedMinimum, speedMaximum);
     out << gap;
-    writeScale(out, rpmScale);
+    writeScale(out, rpmMinimum, rpmMaximum);
     out << '\n';
     const auto caption = [](const std::optional<double>& value, const SignalDescriptor& scale) {
         return (value ? formatValue(*value) : "---") + ' ' + std::string(scale.unit);
