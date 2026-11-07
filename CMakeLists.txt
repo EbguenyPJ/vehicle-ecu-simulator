@@ -26,8 +26,12 @@ add_library(ecu_simulator STATIC src/simulator.cpp)
 target_link_libraries(ecu_simulator PUBLIC ecu_gateway)
 ecu_enable_warnings(ecu_simulator)
 
+add_library(ecu_dashboard STATIC src/braille.cpp src/dashboard.cpp)
+target_link_libraries(ecu_dashboard PUBLIC ecu_control)
+ecu_enable_warnings(ecu_dashboard)
+
 add_executable(vehicle-ecu-simulator src/main.cpp)
-target_link_libraries(vehicle-ecu-simulator PRIVATE ecu_simulator ecu_control)
+target_link_libraries(vehicle-ecu-simulator PRIVATE ecu_simulator ecu_dashboard)
 ecu_enable_warnings(vehicle-ecu-simulator)
 
 include(CTest)
@@ -59,4 +63,12 @@ if(BUILD_TESTING)
     add_test(NAME simulation.cli_faults COMMAND vehicle-ecu-simulator faults)
     set_tests_properties(simulation.nominal simulation.integration simulation.cli_faults
                          PROPERTIES TIMEOUT 10)
+
+    add_executable(dashboard_tests tests/dashboard_tests.cpp)
+    target_link_libraries(dashboard_tests PRIVATE ecu_dashboard ecu_simulator)
+    ecu_enable_warnings(dashboard_tests)
+
+    foreach(test_case IN ITEMS ascii braille pipeline)
+        add_test(NAME dashboard.${test_case} COMMAND dashboard_tests ${test_case})
+    endforeach()
 endif()

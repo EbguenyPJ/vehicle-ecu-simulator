@@ -1,49 +1,118 @@
+#include "ecu/dashboard.hpp"
 #include "ecu/simulation.hpp"
 
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string_view>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <clocale>
+#include <langinfo.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
-std::string_view stateName(ecu::ControlState state) noexcept
+constexpr std::string_view usage = "Uso: vehicle-ecu-simulator [nominal|faults] [--dashboard auto|ascii|braille]\n";
+
+struct Options {
+    ecu::ScenarioKind scenario{ecu::ScenarioKind::nominal};
+    std::optional<ecu::DashboardFormat> dashboard;
+};
+
+std::optional<Options> parseOptions(int argc, char* argv[])
 {
-    switch (state) {
-    case ecu::ControlState::init:
-        return "INIT";
-    case ecu::ControlState::operational:
-        return "OPERATIONAL";
-    case ecu::ControlState::degraded:
-        return "DEGRADED";
-    case ecu::ControlState::safe_state:
-        return "SAFE_STATE";
+    Options options;
+    bool scenarioSeen = false;
+    bool dashboardSeen = false;
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view arg = argv[index];
+        if (arg == "--dashboard") {
+            if (dashboardSeen || index + 1 == argc) {
+                return std::nullopt;
+            }
+            dashboardSeen = true;
+            const std::string_view format = argv[++index];
+            if (format == "ascii") {
+                options.dashboard = ecu::DashboardFormat::ascii;
+            } else if (format == "braille") {
+                options.dashboard = ecu::DashboardFormat::braille;
+            } else if (format != "auto") {
+                return std::nullopt;
+            }
+        } else if (!scenarioSeen && (arg == "nominal" || arg == "faults")) {
+            options.scenario = arg == "faults" ? ecu::ScenarioKind::faults : ecu::ScenarioKind::nominal;
+            scenarioSeen = true;
+        } else {
+            return std::nullopt;
+        }
     }
-    return "UNKNOWN";
+    return options;
 }
 
-void printCycle(const ecu::SignalSnapshot&, const ecu::ControlResult& result)
+struct TerminalOutput {
+    bool utf8{false};
+    std::size_t columns{0};
+};
+
+TerminalOutput detectTerminal()
 {
-    std::cout << "cycle=" << result.cycle << " state=" << stateName(result.state);
-    if (result.latchedFault) {
-        std::cout << " safe_since=" << result.latchedFault->cycle;
+    TerminalOutput terminal;
+#if defined(__unix__) || defined(__APPLE__)
+    if (::isatty(STDOUT_FILENO) == 0) {
+        return terminal;
     }
-    std::cout << '\n';
+
+    winsize size{};
+    if (::ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0) {
+        terminal.columns = size.ws_col;
+    }
+
+    const char* term = std::getenv("TERM");
+    if ((term == nullptr || std::string_view(term) != "dumb") &&
+        std::setlocale(LC_CTYPE, "") != nullptr) {
+        const std::string_view encoding = ::nl_langinfo(CODESET);
+        terminal.utf8 = encoding == "UTF-8" || encoding == "UTF8" ||
+                        encoding == "utf-8" || encoding == "utf8";
+    }
+#endif
+    return terminal;
 }
 
 }  // namespace
 
 int main(int argc, char* argv[])
 {
-    const std::string_view name = argc > 1 ? argv[1] : "nominal";
-    if (argc > 2 || (name != "nominal" && name != "faults")) {
-        std::cerr << "Uso: vehicle-ecu-simulator [nominal|faults]\n";
+    if (argc == 2 && std::string_view(argv[1]) == "--help") {
+        std::cout << usage;
+        return EXIT_SUCCESS;
+    }
+
+    const auto options = parseOptions(argc, argv);
+    if (!options) {
+        std::cerr << usage;
         return EXIT_FAILURE;
     }
 
-    const auto kind = name == "faults" ? ecu::ScenarioKind::faults : ecu::ScenarioKind::nominal;
-    const auto scenario = ecu::makeScenario(kind);
-    if (!scenario || !ecu::runScenario(*scenario, printCycle)) {
+    const auto terminal = detectTerminal();
+    const auto format = options->dashboard.value_or(ecu::selectDashboardFormat(terminal.utf8, terminal.columns));
+    const auto scenario = ecu::makeScenario(options->scenario);
+
+    bool outputOk = true;
+    const auto render = [&](const ecu::SignalSnapshot& snapshot, const ecu::ControlResult& control) {
+        if (outputOk) {
+            outputOk = ecu::renderDashboard(std::cout, snapshot, control, format, terminal.columns);
+        }
+    };
+
+    if (!scenario || !ecu::runScenario(*scenario, render)) {
         std::cerr << "No se pudo completar el escenario.\n";
+        return EXIT_FAILURE;
+    }
+    if (!outputOk || !std::cout.flush()) {
+        std::cerr << "No se pudo escribir el dashboard.\n";
         return EXIT_FAILURE;
     }
     return EXIT_SUCCESS;

@@ -1,6 +1,6 @@
 # Vehicle ECU Simulator
 
-Proyecto en C++17 para simular el flujo de señales de un vehículo. El simulador produce lecturas correlacionadas a partir de un guion de conducción y fallas. La Gateway califica las seis señales y publica una instantánea por ciclo. La ECU de Control lee esa instantánea y decide el estado, el diagnóstico y la acción simulada. El coordinador ejecuta el recorrido con ciclos lógicos, sin depender de un reloj real.
+Proyecto en C++17 para simular el flujo de señales de un vehículo. El simulador produce lecturas correlacionadas a partir de un guion de conducción y fallas. La Gateway califica las seis señales y publica una instantánea por ciclo. La ECU de Control lee esa instantánea y decide el estado, el diagnóstico y la acción simulada. El Dashboard presenta la misma instantánea junto con el resultado de Control. El coordinador ejecuta el recorrido con ciclos lógicos, sin depender de un reloj real.
 
 ## Contrato de señales
 
@@ -105,6 +105,19 @@ Los escenarios `nominal` y `faults` duran 42 ciclos. Ambos programan un pedal de
 | 14–17 | Omite las seis lecturas. | `DEGRADED` de 14 a 16. En 17 caducan las muestras y Control enclava `SAFE_STATE`. Las lecturas vuelven en 18 y el estado permanece enclavado. |
 | 20 | Sustituye la temperatura por 130 °C. | Control detecta sobretemperatura como hallazgo actual. La causa enclavada sigue siendo la del ciclo 17. |
 
+## Dashboard de terminal
+
+`renderDashboard(out, snapshot, result, format, columns)`, declarado en `ecu/dashboard.hpp`, recibe por referencia de solo lectura la instantánea y el resultado de Control del observador. Consulta cada señal durante el renderizado, sin retener referencias ni duplicar el arreglo de señales. Devuelve `false` si los ciclos difieren o el flujo de salida indica un error.
+
+| Formato | Presentación |
+| --- | --- |
+| `ascii` | Tabla de seis señales con valor, unidad, calidad, frescura y edad en ciclos. En terminales de ancho conocido inferior a 80 columnas, presenta cada señal por campos en líneas separadas. |
+| `braille` | Relojes UTF-8 de velocidad y RPM seguidos de la misma tabla. Cada reloj dibuja su aguja únicamente si la lectura está fresca y es válida. |
+
+La calidad de la última muestra y su frescura aparecen en campos independientes. Una muestra retenida o caducada conserva su valor para diagnóstico, con la antigüedad visible y la marca `RETENIDA` o `CADUCADA`. Si la señal nunca se recibió, el valor y la edad se muestran como ausentes. Los valores no finitos aparecen como `nan`, `+inf` o `-inf`.
+
+La sección de Control muestra el estado, la acción simulada y todos los diagnósticos del ciclo. La causa y el ciclo originales del enclavamiento aparecen por separado. En el ciclo 18 de `faults`, las señales recuperan su frescura y Control sigue en `SAFE_STATE` con la causa del ciclo 17. En el 20, la sobretemperatura aparece como diagnóstico activo junto a esa misma causa enclavada. Ambos formatos escriben un cuadro por ciclo en secuencia, sin códigos ANSI ni pausas.
+
 ## Requisitos verificables
 
 | ID | El proyecto debe cumplir | Caso de CTest |
@@ -124,6 +137,9 @@ Los escenarios `nominal` y `faults` duran 42 ciclos. Ambos programan un pedal de
 | SIM-02 | Aplicar omisiones y reemplazos en sus intervalos exactos, conservar la trayectoria nominal y rechazar una agenda ambigua. | `simulation.fault_schedule` |
 | SIM-03 | Ejecutar el flujo completo por ciclo y reproducir los estados y diagnósticos de los recorridos nominal y con fallas. | `simulation.integration` |
 | SIM-04 | Ejecutar el escenario con fallas desde la línea de comandos hasta completar el guion. | `simulation.cli_faults` |
+| DASH-01 | Presentar las seis señales en ASCII con calidad, frescura y edad independientes, incluidos valores ausentes y no finitos. | `dashboard.ascii` |
+| DASH-02 | Dibujar ambos relojes braille y conservar la tabla de señales y el resultado de Control. Mostrar agujas solo para lecturas frescas y válidas. | `dashboard.braille` |
+| DASH-03 | Renderizar ambas vistas sobre la instantánea y el resultado del mismo ciclo durante el guion real, diferenciando diagnósticos activos y causa enclavada. | `dashboard.pipeline` |
 
 ## Prácticas que se deben evitar
 
@@ -136,6 +152,7 @@ Los escenarios `nominal` y `faults` duran 42 ciclos. Ambos programan un pedal de
 - Omitir un monitor independiente porque ya existe otro hallazgo o interpretar unas RPM ausentes como prueba de que el motor está detenido.
 - Reemplazar la causa enclavada por un diagnóstico posterior o liberar `SAFE_STATE` por la sola desaparición de una falla.
 - Usar el reloj real para avanzar un escenario o cambiar la trayectoria de la planta a partir de lecturas inyectadas.
+- Mostrar una aguja a partir de una muestra histórica, presentar un cuadro con datos de ciclos distintos o inferir el estado de Control a partir de la tabla de señales.
 
 ## Compilación y pruebas
 
@@ -147,15 +164,18 @@ cmake --build build --config Debug
 (cd build && ctest -C Debug --output-on-failure)
 ```
 
-Con un generador de configuración única, ejecuta los recorridos así.
+Con un generador de configuración única, la sintaxis del ejecutable es `./build/vehicle-ecu-simulator [nominal|faults] [--dashboard auto|ascii|braille]`. Por ejemplo, puedes ejecutar el recorrido nominal con el formato automático, guardar un registro ASCII o solicitar los relojes braille explícitamente.
 
 ```sh
 ./build/vehicle-ecu-simulator nominal
-./build/vehicle-ecu-simulator faults
+./build/vehicle-ecu-simulator faults --dashboard ascii > fallas.txt
+./build/vehicle-ecu-simulator faults --dashboard braille
 ```
 
-La opción predeterminada es `nominal`. El ejecutable imprime el ciclo y el estado de Control y añade `safe_since` cuando hay un enclavamiento. Devuelve 0 cuando completa el guion, incluso si el escenario activa `SAFE_STATE`. Con un generador multiconfiguración, usa el ejecutable de la configuración compilada, por ejemplo `build/Debug/vehicle-ecu-simulator`.
+El escenario predeterminado es `nominal` y el formato predeterminado es `auto`. En macOS y Linux, `auto` selecciona braille si la salida es una terminal de al menos 80 columnas y la configuración regional indica UTF-8. Usa ASCII en una terminal más estrecha, al redirigir la salida o si la capacidad de la terminal no puede confirmarse. En otros entornos, la selección automática usa ASCII. La opción explícita `--dashboard braille` genera UTF-8 incluso con la salida redirigida.
+
+El ejecutable devuelve 0 cuando completa el guion, incluso si el escenario activa `SAFE_STATE`. Con un generador multiconfiguración, usa el ejecutable de la configuración compilada, por ejemplo `build/Debug/vehicle-ecu-simulator`.
 
 ## Alcance actual
 
-El entregable incluye el simulador, Gateway, Control, el coordinador de escenarios y sus pruebas en CTest. El ciclo representa tiempo simulado y las acciones de Control se publican como parte de su resultado. El **Dashboard** previsto presentará la calidad y frescura de las señales y, por separado, el estado y la causa que publique Control. La cadencia física de muestreo y cualquier adaptador de bus requieren contratos propios.
+El entregable incluye el simulador, Gateway, Control, el coordinador de escenarios, el Dashboard de terminal y sus pruebas en CTest. El ciclo representa tiempo simulado y las acciones de Control se publican como parte de su resultado. La cadencia física de muestreo y cualquier adaptador de bus requieren contratos propios.

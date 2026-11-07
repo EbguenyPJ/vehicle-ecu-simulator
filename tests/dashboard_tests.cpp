@@ -1,0 +1,350 @@
+#include "ecu/dashboard.hpp"
+#include "ecu/simulation.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cstdlib>
+#include <exception>
+#include <iostream>
+#include <limits>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+
+namespace {
+
+using namespace ecu;
+
+void require(bool condition, std::string_view message)
+{
+    if (!condition) {
+        throw std::runtime_error(std::string(message));
+    }
+}
+
+void expectText(std::string_view frame, std::string_view expected)
+{
+    if (frame.find(expected) == std::string_view::npos) {
+        throw std::runtime_error("missing dashboard text: " + std::string(expected));
+    }
+}
+
+constexpr std::array<std::string_view, 6> signalNames{
+    "Velocidad", "RPM", "Temperatura", "Acelerador", "Bateria", "Aceite",
+};
+
+std::string_view rowFor(std::string_view frame, std::string_view signal)
+{
+    while (!frame.empty()) {
+        const auto end = frame.find('\n');
+        const auto line = frame.substr(0, end);
+        if (line.substr(0, signal.size()) == signal && line.size() > signal.size() &&
+            line[signal.size()] == ' ') {
+            return line;
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        frame.remove_prefix(end + 1);
+    }
+    throw std::runtime_error("missing signal row: " + std::string(signal));
+}
+
+struct SignalColumns {
+    std::string value;
+    std::string unit;
+    std::string quality;
+    std::string freshness;
+    std::string age;
+};
+
+SignalColumns columnsFor(std::string_view frame, std::string_view signal)
+{
+    std::istringstream row{std::string(rowFor(frame, signal))};
+    std::string label;
+    SignalColumns columns;
+    require(static_cast<bool>(row >> label >> columns.value >> columns.unit >>
+                              columns.quality >> columns.freshness >> columns.age),
+            "a dashboard row must contain every signal column");
+    return columns;
+}
+
+void expectSignal(std::string_view frame, std::string_view signal, std::string_view quality,
+                  std::string_view freshness, std::string_view age)
+{
+    const auto columns = columnsFor(frame, signal);
+    if (columns.quality != quality || columns.freshness != freshness || columns.age != age) {
+        throw std::runtime_error("unexpected quality, freshness or age in row: " +
+                                 std::string(rowFor(frame, signal)));
+    }
+}
+
+std::string render(const SignalSnapshot& snapshot, const ControlResult& result,
+                   DashboardFormat format, std::size_t columns = dashboardMinBrailleColumns)
+{
+    std::ostringstream out;
+    require(renderDashboard(out, snapshot, result, format, columns),
+            "a coherent cycle must render successfully");
+    return out.str();
+}
+
+struct Tick {
+    SignalSnapshot snapshot;
+    ControlResult result;
+};
+
+Tick process(Gateway& gateway, ControlECU& control, Cycle cycle, const SignalBatch& batch)
+{
+    const auto snapshot = gateway.processCycle(cycle, batch);
+    require(snapshot.has_value(), "Gateway must publish an increasing cycle");
+    const auto result = control.step(*snapshot);
+    require(result.has_value(), "Control must process the published cycle");
+    return {*snapshot, *result};
+}
+
+void ascii()
+{
+    Gateway gateway;
+    ControlECU control;
+    SignalBatch batch;
+    const double infinity = std::numeric_limits<double>::infinity();
+    batch.add(SignalId::speed, 0.0);
+    batch.add(SignalId::engine_rpm, -std::numeric_limits<double>::max());
+    batch.add(SignalId::coolant_temperature, std::numeric_limits<double>::quiet_NaN());
+    batch.add(SignalId::throttle_position, infinity);
+    batch.add(SignalId::battery_voltage, -infinity);
+
+    const auto tick = process(gateway, control, 1, batch);
+    const auto frame = render(tick.snapshot, tick.result, DashboardFormat::ascii);
+    expectText(frame, "VEHICLE ECU SIMULATOR | CICLO 1");
+    expectText(frame, "Control: SAFE_STATE");
+    expectText(frame, "Accion: INHIBIR");
+    require(std::all_of(frame.begin(), frame.end(), [](unsigned char byte) {
+        return byte == '\n' || (byte >= 32 && byte <= 126);
+    }), "ASCII output must contain printable ASCII and newlines only");
+
+    expectSignal(frame, "Velocidad", "VALIDA", "FRESCA", "0");
+    expectSignal(frame, "RPM", "FUERA_RANGO", "FRESCA", "0");
+    expectSignal(frame, "Temperatura", "NO_FINITA", "FRESCA", "0");
+    expectSignal(frame, "Acelerador", "NO_FINITA", "FRESCA", "0");
+    expectSignal(frame, "Bateria", "NO_FINITA", "FRESCA", "0");
+    expectSignal(frame, "Aceite", "SIN_MUESTRA", "NO_RECIBIDA", "-");
+    require(columnsFor(frame, "Velocidad").value == "0" &&
+                columnsFor(frame, "Velocidad").unit == "km/h" &&
+                columnsFor(frame, "RPM").unit == "rpm" &&
+                columnsFor(frame, "Aceite").value == "---",
+            "zero, units and missing values must be distinct");
+    require(columnsFor(frame, "Temperatura").value == "nan" &&
+                columnsFor(frame, "Acelerador").value == "+inf" &&
+                columnsFor(frame, "Bateria").value == "-inf",
+            "the three non-finite values must be distinguishable");
+    require(rowFor(frame, "RPM").size() <= dashboardMinBrailleColumns,
+            "even the maximum finite reading must fit in a wide row");
+    const auto lastCycle = std::numeric_limits<Cycle>::max();
+    const auto aged = process(gateway, control, lastCycle, SignalBatch{});
+    const auto agedFrame = render(aged.snapshot, aged.result, DashboardFormat::ascii);
+    expectSignal(agedFrame, "RPM", "FUERA_RANGO", "CADUCADA", std::to_string(lastCycle - 1));
+    require(rowFor(agedFrame, "RPM").size() <= dashboardMinBrailleColumns,
+            "the largest age and a large sample must share a wide row");
+
+    const auto narrow = render(tick.snapshot, tick.result, DashboardFormat::ascii, 48);
+    expectText(narrow, "Senal: Velocidad");
+    expectText(narrow, "  Valor: 0");
+    expectText(narrow, "  Calidad: VALIDA");
+    expectText(narrow, "  Frescura: FRESCA");
+    expectText(narrow, "  Edad: 0");
+    expectText(narrow, "Senal: Aceite");
+    expectText(narrow, "  Calidad: SIN_MUESTRA");
+    expectText(narrow, "  Frescura: NO_RECIBIDA");
+    require(selectDashboardFormat(false, 120) == DashboardFormat::ascii &&
+                selectDashboardFormat(true, 0) == DashboardFormat::ascii &&
+                selectDashboardFormat(true, dashboardMinBrailleColumns - 1) == DashboardFormat::ascii &&
+                selectDashboardFormat(true, dashboardMinBrailleColumns) == DashboardFormat::braille,
+            "automatic selection needs both UTF-8 terminal support and sufficient width");
+
+    auto mismatched = tick.result;
+    ++mismatched.cycle;
+    std::ostringstream mismatchOutput;
+    mismatchOutput << "unchanged";
+    require(!renderDashboard(mismatchOutput, tick.snapshot, mismatched, DashboardFormat::ascii) &&
+                mismatchOutput.str() == "unchanged",
+            "different cycles must be rejected without writing");
+    std::ostringstream failedOutput;
+    failedOutput.setstate(std::ios::badbit);
+    require(!renderDashboard(failedOutput, tick.snapshot, tick.result, DashboardFormat::ascii),
+            "a failed stream must be reported");
+}
+
+std::string brailleGlyphs(std::string_view frame)
+{
+    std::string glyphs;
+    for (std::size_t offset = 0; offset + 2 < frame.size(); ++offset) {
+        const auto first = static_cast<unsigned char>(frame[offset]);
+        const auto second = static_cast<unsigned char>(frame[offset + 1]);
+        const auto third = static_cast<unsigned char>(frame[offset + 2]);
+        if (first == 0xe2 && second >= 0xa0 && second <= 0xa3 && third >= 0x80 && third <= 0xbf) {
+            glyphs.append(frame.substr(offset, 3));
+            offset += 2;
+        }
+    }
+    return glyphs;
+}
+
+std::string_view tableAndControl(std::string_view frame)
+{
+    const auto table = frame.find("Senal");
+    require(table != std::string_view::npos, "a wide dashboard needs a signal table");
+    return frame.substr(table);
+}
+
+SignalBatch auxiliaryReadings()
+{
+    SignalBatch batch;
+    batch.add(SignalId::coolant_temperature, 90.0);
+    batch.add(SignalId::throttle_position, 50.0);
+    batch.add(SignalId::battery_voltage, 13.8);
+    batch.add(SignalId::oil_pressure, 2.5);
+    return batch;
+}
+
+void braille()
+{
+    Gateway gateway;
+    ControlECU control;
+    const auto auxiliary = auxiliaryReadings();
+    const auto emptyDials = process(gateway, control, 1, auxiliary);
+    const auto empty = render(emptyDials.snapshot, emptyDials.result, DashboardFormat::braille);
+    const auto arc = brailleGlyphs(empty);
+    require(!arc.empty(), "even without a reading, the Braille dial arcs must be visible");
+    expectText(empty, "VELOCIDAD");
+    expectText(empty, "RPM");
+    expectText(empty, "Control: INIT");
+    expectText(empty, "Accion: INHIBIR");
+
+    auto lowerReadings = auxiliary;
+    lowerReadings.add(SignalId::speed, 40.0);
+    lowerReadings.add(SignalId::engine_rpm, 1800.0);
+    const auto lower = process(gateway, control, 2, lowerReadings);
+    const auto lowDial = render(lower.snapshot, lower.result, DashboardFormat::braille);
+    require(brailleGlyphs(lowDial) != arc, "fresh valid samples must draw a needle");
+
+    auto higherReadings = auxiliary;
+    higherReadings.add(SignalId::speed, 100.0);
+    higherReadings.add(SignalId::engine_rpm, 4500.0);
+    const auto higher = process(gateway, control, 3, higherReadings);
+    const auto highDial = render(higher.snapshot, higher.result, DashboardFormat::braille);
+    require(brailleGlyphs(highDial) != brailleGlyphs(lowDial),
+            "the rendered needles must move as the readings change");
+    require(highDial.find('\x1b') == std::string::npos,
+            "a Braille frame must not depend on terminal escapes");
+    require(tableAndControl(highDial) ==
+                tableAndControl(render(higher.snapshot, higher.result, DashboardFormat::ascii)),
+            "both formats must display the same signal and control data");
+
+    const auto retained = process(gateway, control, 4, auxiliary);
+    require(brailleGlyphs(render(retained.snapshot, retained.result, DashboardFormat::braille)) == arc,
+            "retained readings must not move the needles");
+    const auto expired = process(gateway, control, 7, auxiliary);
+    require(brailleGlyphs(render(expired.snapshot, expired.result, DashboardFormat::braille)) == arc,
+            "expired readings must not move the needles");
+
+    auto invalidReadings = auxiliary;
+    invalidReadings.add(SignalId::speed, 500.0);
+    invalidReadings.add(SignalId::engine_rpm, std::numeric_limits<double>::infinity());
+    const auto invalid = process(gateway, control, 8, invalidReadings);
+    require(brailleGlyphs(render(invalid.snapshot, invalid.result, DashboardFormat::braille)) == arc,
+            "out-of-range and non-finite readings must not move the needles");
+}
+
+void pipeline()
+{
+    const auto scenario = makeScenario(ScenarioKind::faults);
+    require(scenario.has_value(), "the fault scenario must be available");
+    Cycle observed = 0;
+    const bool finished = runScenario(*scenario, [&](const SignalSnapshot& snapshot, const ControlResult& result) {
+        ++observed;
+        const auto table = render(snapshot, result, DashboardFormat::ascii);
+        const auto dials = render(snapshot, result, DashboardFormat::braille);
+        expectText(table, "VEHICLE ECU SIMULATOR | CICLO " + std::to_string(observed) + "\n");
+        require(tableAndControl(table) == tableAndControl(dials),
+                "both Dashboard formats must show the same data at every cycle");
+
+        if (observed == 1) {
+            expectText(table, "Control: OPERATIONAL");
+            expectText(table, "Accion: NORMAL");
+        } else if (observed == 5) {
+            expectSignal(table, "Bateria", "VALIDA", "RETENIDA", "1");
+            expectText(table, "Control: DEGRADED");
+            expectText(table, "Accion: LIMITADA");
+            expectText(table, "[DEGRADANTE] SENAL_RETENIDA [Bateria]");
+        } else if (observed == 6) {
+            expectText(table, "RECUPERACION_PENDIENTE");
+        } else if (observed == 9 || observed == 10) {
+            expectSignal(table, "Acelerador", "FUERA_RANGO", "FRESCA", "0");
+            expectText(table, "MEDICION_FUERA_RANGO [Acelerador]");
+        } else if (observed >= 14 && observed <= 17) {
+            const auto age = std::to_string(observed - 13);
+            for (const auto signal : signalNames) {
+                expectSignal(table, signal, "VALIDA", observed == 17 ? "CADUCADA" : "RETENIDA", age);
+            }
+            if (observed == 17) {
+                expectText(table, "[CRITICO] SENAL_CADUCADA [Temperatura]");
+            }
+        } else if (observed == 18) {
+            for (const auto signal : signalNames) {
+                expectSignal(table, signal, "VALIDA", "FRESCA", "0");
+            }
+            expectText(table, "Diagnostico actual: NINGUNO");
+        } else if (observed == 20) {
+            expectSignal(table, "Temperatura", "VALIDA", "FRESCA", "0");
+            expectText(table, "[CRITICO] SOBRE_TEMPERATURA [Temperatura]");
+        }
+
+        if (observed >= 17) {
+            expectText(table, "Control: SAFE_STATE");
+            expectText(table, "Accion: INHIBIR");
+            expectText(table, "Causa enclavada: SENAL_CADUCADA [Temperatura]");
+            expectText(table, "Ciclo de enclavamiento: 17");
+        } else {
+            expectText(table, "Causa enclavada: NINGUNA");
+        }
+    });
+    require(finished && observed == scenario->cycles() && observed == 42,
+            "the Dashboard must receive every cycle of the real fault scenario");
+}
+
+struct TestCase {
+    std::string_view name;
+    void (*run)();
+};
+
+constexpr std::array cases{
+    TestCase{"ascii", ascii},
+    TestCase{"braille", braille},
+    TestCase{"pipeline", pipeline},
+};
+
+}  // namespace
+
+int main(int argc, char* argv[])
+{
+    if (argc != 2) {
+        std::cerr << "Expected one test case name.\n";
+        return EXIT_FAILURE;
+    }
+
+    for (const auto& test : cases) {
+        if (test.name == argv[1]) {
+            try {
+                test.run();
+                return EXIT_SUCCESS;
+            } catch (const std::exception& error) {
+                std::cerr << test.name << ": " << error.what() << '\n';
+                return EXIT_FAILURE;
+            }
+        }
+    }
+    std::cerr << "Unknown test case: " << argv[1] << '\n';
+    return EXIT_FAILURE;
+}
