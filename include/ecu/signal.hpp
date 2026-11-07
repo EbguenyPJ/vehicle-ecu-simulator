@@ -25,16 +25,15 @@ struct SignalDescriptor {
     std::string_view unit{};
     double minimum{0.0};
     double maximum{0.0};
-    Cycle toleratedMissingCycles{0};
 };
 
 inline constexpr std::array signalCatalog{
-    SignalDescriptor{SignalId::speed,                "km/h",   0.0,  250.0, 3},
-    SignalDescriptor{SignalId::engine_rpm,            "rpm",    0.0, 8000.0, 3},
-    SignalDescriptor{SignalId::coolant_temperature,   "degC", -40.0,  150.0, 3},
-    SignalDescriptor{SignalId::throttle_position,    "%",      0.0,  100.0, 3},
-    SignalDescriptor{SignalId::battery_voltage,      "V",      9.0,   16.0, 3},
-    SignalDescriptor{SignalId::oil_pressure,         "bar",    0.0,   10.0, 3},
+    SignalDescriptor{SignalId::speed,                "km/h",   0.0,  250.0},
+    SignalDescriptor{SignalId::engine_rpm,            "rpm",    0.0, 8000.0},
+    SignalDescriptor{SignalId::coolant_temperature,   "degC", -40.0,  150.0},
+    SignalDescriptor{SignalId::throttle_position,    "%",      0.0,  100.0},
+    SignalDescriptor{SignalId::battery_voltage,      "V",      9.0,   16.0},
+    SignalDescriptor{SignalId::oil_pressure,         "bar",    0.0,   10.0},
 };
 
 inline constexpr std::size_t signalCount = signalCatalog.size();
@@ -52,6 +51,13 @@ enum class Freshness {
     expired,
 };
 
+// Resultado de Gateway: la ausencia o caducidad prevalece sobre la calidad.
+enum class SignalStatus {
+    valid,
+    invalid,
+    missing,
+};
+
 struct SignalSample {
     double value{std::numeric_limits<double>::quiet_NaN()};
     SampleQuality quality{SampleQuality::non_finite};
@@ -62,6 +68,7 @@ struct SignalObservation {
     std::optional<SignalSample> sample;
     std::optional<Cycle> age;
     Freshness freshness{Freshness::never_received};
+    SignalStatus status{SignalStatus::missing};
 };
 
 namespace detail {

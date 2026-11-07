@@ -15,7 +15,7 @@
 namespace ecu {
 namespace {
 
-constexpr std::array<std::size_t, 5> columnWidths{12, 12, 6, 11, 11};
+constexpr std::array<std::size_t, 6> columnWidths{11, 10, 4, 7, 11, 11};
 constexpr std::string_view spaces = "                           ";
 
 std::string_view signalName(SignalId id) noexcept
@@ -39,6 +39,16 @@ std::string_view qualityName(SampleQuality quality) noexcept
     case SampleQuality::non_finite: return "NO_FINITA";
     }
     return "DESCONOCIDA";
+}
+
+std::string_view statusName(SignalStatus status) noexcept
+{
+    switch (status) {
+    case SignalStatus::valid: return "VALID";
+    case SignalStatus::invalid: return "INVALID";
+    case SignalStatus::missing: return "MISSING";
+    }
+    return "DESCONOCIDO";
 }
 
 std::string_view freshnessName(Freshness freshness) noexcept
@@ -105,13 +115,13 @@ std::string formatValue(double value)
     auto formatted = text.str();
     if (formatted.size() > columnWidths[1]) {
         text.str({});
-        text << std::scientific << std::setprecision(4) << value;
+        text << std::scientific << std::setprecision(2) << value;
         formatted = text.str();
     }
     return formatted;
 }
 
-void writeRow(std::ostream& out, const std::array<std::string_view, 6>& fields)
+void writeRow(std::ostream& out, const std::array<std::string_view, 7>& fields)
 {
     for (std::size_t index = 0; index < columnWidths.size(); ++index) {
         const auto field = fields[index];
@@ -127,13 +137,14 @@ void writeRow(std::ostream& out, const std::array<std::string_view, 6>& fields)
 void writeSignals(std::ostream& out, const SignalSnapshot& snapshot, bool compact)
 {
     if (!compact) {
-        writeRow(out, {"Senal", "Valor", "Unidad", "Calidad", "Frescura", "Edad"});
+        writeRow(out, {"Senal", "Valor", "Unid", "Gateway", "Calidad", "Frescura", "Edad"});
     }
 
     for (const auto& descriptor : signalCatalog) {
         const auto observation = snapshot.observe(descriptor.id).value_or(SignalObservation{});
         const auto value = observation.sample ? formatValue(observation.sample->value) : "---";
         const auto quality = observation.sample ? qualityName(observation.sample->quality) : "SIN_MUESTRA";
+        const auto status = statusName(observation.status);
         const auto freshness = freshnessName(observation.freshness);
         const auto age = observation.age ? std::to_string(*observation.age) : "-";
         const auto name = signalName(descriptor.id);
@@ -141,11 +152,12 @@ void writeSignals(std::ostream& out, const SignalSnapshot& snapshot, bool compac
         if (compact) {
             out << "Senal: " << name << '\n'
                 << "  Valor: " << value << ' ' << descriptor.unit << '\n'
+                << "  Resultado: " << status << '\n'
                 << "  Calidad: " << quality << '\n'
                 << "  Frescura: " << freshness << '\n'
                 << "  Edad: " << age << '\n';
         } else {
-            writeRow(out, {name, value, descriptor.unit, quality, freshness, age});
+            writeRow(out, {name, value, descriptor.unit, status, quality, freshness, age});
         }
     }
 }

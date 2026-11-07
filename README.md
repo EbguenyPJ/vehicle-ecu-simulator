@@ -2,6 +2,8 @@
 
 Proyecto en C++17 para simular el flujo de señales de un vehículo. El simulador produce lecturas correlacionadas a partir de un guion de conducción y fallas. La Gateway califica las seis señales y publica una instantánea por ciclo. La ECU de Control lee esa instantánea y decide el estado, el diagnóstico y la acción simulada. El Dashboard presenta la misma instantánea junto con el resultado de Control. El coordinador ejecuta el recorrido con ciclos lógicos, sin depender de un reloj real.
 
+Incorpora los resultados `VALID`, `INVALID` y `MISSING`, y configura la antigüedad máxima por instancia de Gateway. Cada instantánea conserva esa política temporal. Control mantiene sus cuatro estados y sus reglas actuales.
+
 ## Compilación y pruebas
 
 Ejecuta estos comandos desde la raíz del proyecto en un shell POSIX. Se requiere CMake 3.16 o posterior y un compilador C++17.
@@ -38,7 +40,8 @@ flowchart LR
 
 | Componente | Responsabilidad |
 | --- | --- |
-| `SignalDescriptor`, `SignalSample` y `SignalObservation` | Metadatos, muestra y observación con calidad y edad. |
+| `SignalDescriptor`, `SignalSample` y `SignalObservation` | Metadatos, muestra y observación con resultado de Gateway, calidad y edad. |
+| `GatewayConfig` | Límite de antigüedad común a las seis señales de una Gateway. |
 | `VehicleSimulator` y `Scenario` | Planta correlacionada, conducción e inyección por ciclo. |
 | `Gateway` | Validación y conservación de señales, publicación de instantáneas. |
 | `ControlECU` | Diagnósticos, máquina de estados y acción simulada. |
@@ -74,23 +77,45 @@ Los targets `ecu_gateway`, `ecu_control`, `ecu_simulator` y `ecu_dashboard` perm
 
 ## Contrato de señales
 
-| ID                    | Señal                        | Unidad | Rango inclusivo | Omisiones toleradas |
-| --------------------- | ---------------------------- | ------ | --------------- | ------------------- |
-| `speed`               | Velocidad                    | km/h   | 0 a 250         | 3                   |
-| `engine_rpm`          | Régimen del motor            | rpm    | 0 a 8000        | 3                   |
-| `coolant_temperature` | Temperatura del refrigerante | °C     | −40 a 150       | 3                   |
-| `throttle_position`   | Posición del acelerador      | %      | 0 a 100         | 3                   |
-| `battery_voltage`     | Voltaje de batería           | V      | 9 a 16          | 3                   |
-| `oil_pressure`        | Presión de aceite            | bar    | 0 a 10          | 3                   |
+| ID                    | Señal                        | Unidad | Rango inclusivo |
+| --------------------- | ---------------------------- | ------ | --------------- |
+| `speed`               | Velocidad                    | km/h   | 0 a 250         |
+| `engine_rpm`          | Régimen del motor            | rpm    | 0 a 8000        |
+| `coolant_temperature` | Temperatura del refrigerante | °C     | −40 a 150       |
+| `throttle_position`   | Posición del acelerador      | %      | 0 a 100         |
+| `battery_voltage`     | Voltaje de batería           | V      | 9 a 16          |
+| `oil_pressure`        | Presión de aceite            | bar    | 0 a 10          |
 
-El catálogo fija la unidad, el rango de aceptación de la muestra y la tolerancia temporal de cada señal. La API representa °C con la cadena ASCII `degC`. Los rangos y plazos son parámetros de la simulación. El catálogo se verifica en compilación para asegurar que los IDs coincidan con sus posiciones, las unidades existan y los límites sean finitos y estén ordenados.
+El catálogo fija la unidad y el rango de aceptación de cada señal. La API representa °C con la cadena ASCII `degC`. El catálogo se verifica en compilación para asegurar que los IDs coincidan con sus posiciones, las unidades existan y los límites sean finitos y estén ordenados. La antigüedad máxima pertenece a `GatewayConfig`, separada de los metadatos estáticos del catálogo.
+
+### Antigüedad configurable
+
+`GatewayConfig::maxAgeCycles` define el límite inclusivo de edad para las seis señales de una instancia. La edad se calcula como `ciclo_actual - ciclo_ultima_recepcion`; la muestra caduca únicamente cuando `edad > maxAgeCycles`. `Gateway{}` usa tres ciclos. También puede elegirse otra política al construirla:
+
+```cpp
+#include "ecu/gateway.hpp"
+
+ecu::Gateway gateway{ecu::GatewayConfig{1}};
+ecu::SignalBatch batch;
+batch.add(ecu::SignalId::coolant_temperature, 90.0);
+
+const auto received = gateway.processCycle(10, batch);              // VALID, fresca, edad 0
+const auto retained = gateway.processCycle(11, ecu::SignalBatch{}); // VALID, retenida, edad 1
+const auto expired = gateway.processCycle(12, ecu::SignalBatch{});  // MISSING, caducada, edad 2
+// received->observe(ecu::SignalId::coolant_temperature)->status == ecu::SignalStatus::valid
+// expired->config().maxAgeCycles == 1
+```
+
+La configuración usa `Cycle` (`uint64_t`): cero exige recibir una muestra en el ciclo actual; el máximo representable también es válido. No se suma el límite al ciclo de recepción, por lo que esa suma no puede desbordarse. La configuración se copia al construir Gateway y se conserva por valor en cada instantánea. Modificar el objeto de configuración original, reemplazar o destruir Gateway no altera una instantánea guardada. `SignalSnapshot::config()` devuelve una copia de la política aplicada.
+
+`runScenario` y la CLI siguen utilizando el valor predeterminado de tres ciclos. Para migrar código que consultaba `SignalDescriptor::toleratedMissingCycles`, usar `snapshot.config().maxAgeCycles`: el límite ahora es una política de instancia común a todas las señales.
 
 ### Recepción y ciclos
 
 1. El productor prepara un `SignalBatch` para un ciclo y añade lecturas con `add(id, value)`. El resultado de la primera inserción de un ID conocido es `inserted`, independientemente de la calidad del valor.
 2. Si un ID aparece dos o más veces, el lote descarta todas sus lecturas y devuelve `duplicate_id` desde la segunda ocurrencia. La Gateway conserva la muestra anterior y su ciclo de recepción, si existen. Un ID desconocido devuelve `unknown_id` y se descarta. Los demás canales se procesan normalmente. La instantánea publica un indicador de ID desconocido y marcas de duplicado por señal para el lote aceptado.
 3. `Gateway::snapshot()` consulta la última instantánea publicada. Al arrancar devuelve el estado inicial del ciclo 0. `Gateway::processCycle(cycle, batch)` acepta ciclos estrictamente mayores al último, incluso con un lote vacío. Un ciclo repetido o anterior devuelve `std::nullopt` y conserva el estado y los diagnósticos. Si hay un salto, la edad refleja la distancia entre los números de ciclo. Cada muestra del lote aceptado se registra con ese ciclo.
-4. `SignalSnapshot::observe(id)` devuelve una observación para cada ID conocido y `std::nullopt` para un ID desconocido. Una observación de arranque tiene frescura `never_received`, sin muestra ni edad.
+4. `SignalSnapshot::observe(id)` devuelve una observación para cada ID conocido y `std::nullopt` para un ID desconocido. Una observación de arranque tiene resultado `missing` y frescura `never_received`, sin muestra ni edad. Un ID desconocido no es una señal conocida con resultado `MISSING`.
 
 ### Calidad y frescura
 
@@ -100,14 +125,38 @@ Una recepción única registra el valor crudo, su calidad y el ciclo de recepci�
 | ---------------- | ---------------------------------------------------------------------------------------------------------- |
 | `never_received` | El ID conocido todavía carece de muestra.                                                                  |
 | `fresh`          | La última muestra se recibió en el ciclo actual. Edad 0.                                                   |
-| `retained`       | Hay una muestra anterior con edad de 1 a 3 ciclos en el catálogo inicial.                                  |
+| `retained`       | Hay una muestra anterior con edad de 1 a `maxAgeCycles`, inclusive.                                        |
 | `expired`        | La edad supera la tolerancia. La última muestra sigue disponible para diagnóstico con su calidad original. |
 
-Por ejemplo, una muestra recibida en el ciclo 10 queda retenida del 11 al 13 si faltan actualizaciones y caduca en el 14. Una nueva recepción única vuelve a tener edad 0 y obtiene su propia calidad. Control usa la calidad y la frescura para decidir si limita o inhibe la operación.
+Con la configuración predeterminada, una muestra recibida en el ciclo 10 queda retenida del 11 al 13 si faltan actualizaciones y caduca en el 14. Una nueva recepción única, aunque sea inválida o tenga el mismo valor anterior, vuelve a tener edad 0 y obtiene su propia calidad. Una omisión, un duplicado descartado o un ciclo rechazado no renueva la recepción. Control usa la calidad y la frescura para decidir si limita o inhibe la operación.
+
+### Resultado de Gateway
+
+`SignalObservation::status` publica el resultado mediante `SignalStatus`. Se calcula en `SignalSnapshot::observe`, sin duplicar la validación de rangos en Dashboard ni en los consumidores.
+
+| API C++ | Dashboard | Condición |
+| --- | --- | --- |
+| `SignalStatus::valid` | `VALID` | Muestra vigente con calidad `in_range`, fresca o retenida dentro del límite. |
+| `SignalStatus::invalid` | `INVALID` | Muestra vigente con calidad `out_of_range` o `non_finite`. |
+| `SignalStatus::missing` | `MISSING` | Nunca se recibió una muestra o su edad supera el límite. |
+
+La caducidad tiene prioridad sobre la calidad para este resultado. Por ejemplo, una temperatura de 180 °C pasa de `INVALID` a `MISSING` al vencer el plazo; conserva 180 °C y `out_of_range` para diagnóstico. Recibir 90 °C la devuelve a `VALID`; recibir nuevamente 180 °C la devuelve a `INVALID` con edad cero.
+
+El resultado no expresa criticidad ni ordena transiciones de Control. Una señal `VALID` pero retenida puede seguir degradando la operación según la política conservadora actual de Control. Del mismo modo, recuperar una señal no elimina el enclavamiento de `SAFE_STATE`.
+
+Caso de referencia con `maxAgeCycles = 3`, muestra válida recibida en el ciclo 10 y ninguna recepción posterior:
+
+| Ciclo | Edad | Frescura | Resultado |
+| --- | --- | --- | --- |
+| 10 | 0 | `fresh` | `VALID` |
+| 11 | 1 | `retained` | `VALID` |
+| 12 | 2 | `retained` | `VALID` |
+| 13 | 3 | `retained` | `VALID` |
+| 14 | 4 | `expired` | `MISSING` |
 
 ## Propiedad de los datos
 
-La Gateway mantiene un único estado de señales de capacidad fija. Al aceptar un ciclo, publica por valor una copia de ese estado junto con el número de ciclo y el diagnóstico de entrada. Los lotes y las instantáneas usan almacenamiento fijo y el camino de procesamiento no asigna memoria dinámica. Una instantánea que el llamador conserve mantiene sus datos tras procesar el siguiente ciclo.
+La Gateway mantiene un único estado de señales de capacidad fija. Al aceptar un ciclo, publica por valor una copia de ese estado junto con el número de ciclo, el diagnóstico de entrada y la configuración temporal. Los lotes y las instantáneas usan almacenamiento fijo y el camino de procesamiento no asigna memoria dinámica. Una instantánea que el llamador conserve mantiene sus datos y la política necesaria para interpretar su resultado tras procesar el siguiente ciclo.
 
 `ControlECU::step(const SignalSnapshot&)` lee las observaciones durante la llamada y devuelve un resultado propio por valor. El resultado contiene `cycle`, `state`, `action`, `diagnostics` del ciclo y `latchedFault` si hay una causa enclavada. Control conserva su estado y su diagnóstico de enclavamiento, sin reconstruir el arreglo de señales. El coordinador entrega al observador esa misma instantánea junto con el resultado de Control. Los diagnósticos de entrada, como duplicados e IDs desconocidos, siguen disponibles en la instantánea de la Gateway.
 
@@ -181,10 +230,12 @@ Los escenarios `nominal` y `faults` duran 42 ciclos. Ambos programan un pedal de
 
 | Formato   | Presentación                                                                                                                                                                             |
 | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ascii`   | Tabla de seis señales con valor, unidad, calidad, frescura y edad en ciclos. En terminales de ancho conocido inferior a 80 columnas, presenta cada señal por campos en líneas separadas. |
+| `ascii`   | Tabla de seis señales con valor, unidad, resultado de Gateway, calidad, frescura y edad en ciclos. En terminales de ancho conocido inferior a 80 columnas, presenta cada señal por campos en líneas separadas. |
 | `braille` | Relojes UTF-8 de velocidad y RPM seguidos de la misma tabla. Cada reloj dibuja su aguja únicamente si la lectura está fresca y es válida.                                                |
 
-La calidad de la última muestra y su frescura aparecen en campos independientes. Una muestra retenida o caducada conserva su valor para diagnóstico, con la antigüedad visible y la marca `RETENIDA` o `CADUCADA`. Si la señal nunca se recibió, el valor y la edad se muestran como ausentes. Los valores no finitos aparecen como `nan`, `+inf` o `-inf`.
+El resultado de Gateway aparece bajo la columna `Gateway` de la tabla o el campo `Resultado` de la vista compacta. La calidad de la última muestra y su frescura aparecen en campos independientes. Una muestra retenida o caducada conserva su valor para diagnóstico, con la antigüedad visible y la marca `RETENIDA` o `CADUCADA`. Si la señal nunca se recibió, el valor y la edad se muestran como ausentes. Los valores no finitos aparecen como `nan`, `+inf` o `-inf`.
+
+Las filas de señales caben en 80 columnas incluso con edad máxima de 64 bits. La presentación usa seis cifras significativas; si un valor excede los diez caracteres reservados, usa notación científica con dos decimales. Ese redondeo afecta solo al texto, no al valor conservado por Gateway.
 
 La sección de Control muestra el estado, la acción simulada y todos los diagnósticos del ciclo. La causa y el ciclo originales del enclavamiento aparecen por separado. En el ciclo 18 de `faults`, las señales recuperan su frescura y Control sigue en `SAFE_STATE` con la causa del ciclo 17. En el 20, la sobretemperatura aparece como diagnóstico activo junto a esa misma causa enclavada. Ambos formatos escriben un cuadro por ciclo en secuencia, sin códigos ANSI ni pausas.
 
@@ -197,6 +248,9 @@ La sección de Control muestra el estado, la acción simulada y todos los diagn�
 | GW-03    | Diagnosticar IDs desconocidos y duplicados. Descartar las ocurrencias duplicadas independientemente de su orden, sin renovar su edad ni impedir que se procesen otros canales. | `gateway.malformed_batch`   |
 | GW-04    | Publicar una instantánea autocontenida que pueda conservarse sin alias al estado interno de la Gateway.                                                                        | `gateway.snapshot`          |
 | GW-05    | Procesar un lote por ciclo lógico creciente, calcular la edad a través de saltos y conservar el estado cuando se rechaza un ciclo.                                             | `gateway.cycle_order`       |
+| GW-06    | Publicar `VALID/INVALID/MISSING`, conservar la calidad al caducar y volver a evaluar cada nueva recepción.                                                                      | `gateway.status`            |
+| GW-07    | Aplicar el límite configurado a las seis señales, incluidos cero, frontera inclusiva, saltos y máximo de 64 bits.                                                              | `gateway.configurable_freshness` |
+| GW-08    | Conservar configuración y significado de instantáneas al modificar la configuración original, sustituir o destruir Gateway.                                                    | `gateway.configuration_ownership` |
 | CTRL-01  | Inhibir durante el arranque cuando faltan datos, operar al recibir un ciclo sano y detectar una falla crítica desde el primer ciclo.                                           | `control.startup`           |
 | CTRL-02  | Limitar la operación ante un hallazgo degradante y exigir dos ciclos sanos consecutivos para recuperarse.                                                                      | `control.degradation`       |
 | CTRL-03  | Evaluar los límites de operación y distinguir la falta de una muestra de su caducidad.                                                                                         | `control.operating_limits`  |
@@ -207,30 +261,51 @@ La sección de Control muestra el estado, la acción simulada y todos los diagn�
 | SIM-02   | Aplicar omisiones y reemplazos en sus intervalos exactos, conservar la trayectoria nominal y rechazar una agenda ambigua.                                                      | `simulation.fault_schedule` |
 | SIM-03   | Ejecutar el flujo completo por ciclo y reproducir los estados y diagnósticos de los recorridos nominal y con fallas.                                                           | `simulation.integration`    |
 | SIM-04   | Ejecutar el escenario con fallas desde la línea de comandos hasta completar el guion.                                                                                          | `simulation.cli_faults`     |
-| DASH-01  | Presentar las seis señales en ASCII con calidad, frescura y edad independientes, incluidos valores ausentes y no finitos.                                                      | `dashboard.ascii`           |
+| DASH-01  | Presentar resultado, calidad, frescura y edad independientes en ASCII y vista compacta, incluidos valores ausentes, no finitos y filas extremas de 80 columnas.                 | `dashboard.ascii`           |
 | DASH-02  | Dibujar ambos relojes braille y conservar la tabla de señales y el resultado de Control. Mostrar agujas solo para lecturas frescas y válidas.                                  | `dashboard.braille`         |
 | DASH-03  | Renderizar ambas vistas sobre la instantánea y el resultado del mismo ciclo durante el guion real, diferenciando diagnósticos activos y causa enclavada.                       | `dashboard.pipeline`        |
-| BUILD-01 | Propagar C++17 y las dependencias de enlace a un consumidor externo que solicita un estándar anterior.                                                                         | `build.consumer`            |
+| BUILD-01 | Propagar C++17 y enlace a un consumidor externo que solicita un estándar anterior, ejercitando también configuración y resultados públicos de Gateway.                          | `build.consumer`            |
 
 ## Pruebas y CI
 
-La validación local utiliza macOS 26.5 arm64, AppleClang 21.0.0 y CMake 4.4.4, con advertencias tratadas como errores.
+La validación local, realizada desde directorios de compilación nuevos, AppleClang 21.0.0 y CMake 4.4.4, con advertencias tratadas como errores.
 
 | Configuración | Resultado local |
 | --- | --- |
-| Debug | 19/19 pruebas CTest aprobadas. |
-| Release, benchmark habilitado | 19/19 pruebas CTest aprobadas. |
-| Debug con AddressSanitizer y UndefinedBehaviorSanitizer | 19/19 pruebas CTest aprobadas. |
+| Debug | 22/22 pruebas CTest aprobadas. |
+| Release, benchmark compilado | 22/22 pruebas CTest aprobadas. |
+| Debug con AddressSanitizer y UndefinedBehaviorSanitizer | 22/22 pruebas CTest aprobadas. |
 
-La prueba `build.consumer` crea un proyecto externo que solicita C++11, incluye las seis cabeceras públicas y enlaza las bibliotecas. CMake eleva su estándar a C++17 mediante el requisito público del target. El consumidor ejecuta un ciclo y renderiza el resultado.
+Para reproducir estas configuraciones desde la raíz del proyecto:
 
-Cppcheck 2.22.0 verifica `src/` y `benchmarks/` sin diagnósticos de tipo warning, performance o portability.
+```sh
+cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-Werror
+cmake --build build/debug --parallel
+(cd build/debug && ctest --output-on-failure)
+
+cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DECU_BUILD_BENCHMARKS=ON -DCMAKE_CXX_FLAGS=-Werror
+cmake --build build/release --parallel
+(cd build/release && ctest --output-on-failure)
+
+cmake -S . -B build/sanitizers -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
+  '-DCMAKE_CXX_FLAGS=-Werror -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all'
+cmake --build build/sanitizers --parallel
+(cd build/sanitizers && ctest --output-on-failure)
+```
+
+Estos flags corresponden a Clang/GCC en un shell POSIX; el workflow utiliza las opciones adecuadas de CMake para MSVC. Para ejecutar solo las pruebas de Gateway en Debug: `(cd build/debug && ctest -R '^gateway\.' --output-on-failure)`.
+
+La prueba `build.consumer` crea un proyecto externo que solicita C++11, incluye las seis cabeceras públicas y enlaza las bibliotecas. CMake eleva su estándar a C++17 mediante el requisito público del target. El consumidor verifica una Gateway con límite cero, conserva una instantánea válida tras la caducidad posterior y ejecuta un escenario con renderizado.
+
+La línea base previa fue revisada con Cppcheck 2.22.0 sobre `src/` y `benchmarks/`, sin diagnósticos de tipo warning, performance o portability.
 
 El [workflow de CI](.github/workflows/ci.yml) configura compilación y pruebas en Debug y Release para Linux, macOS y Windows, además de ASan y UBSan en Linux.
 
 ## Rendimiento
 
 El benchmark mide por separado el núcleo y los formatos ASCII y braille del Dashboard con el escenario `faults`. Para compilar el instrumento de medición, habilita `ECU_BUILD_BENCHMARKS=ON` en Release.
+
+Las muestras bajo `benchmarks/results/` corresponden a la versión previa del Dashboard.
 
 ## Alcance
 

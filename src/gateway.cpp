@@ -59,6 +59,11 @@ InputDiagnostics SignalSnapshot::diagnostics() const noexcept
     return diagnostics_;
 }
 
+GatewayConfig SignalSnapshot::config() const noexcept
+{
+    return config_;
+}
+
 std::optional<SignalObservation> SignalSnapshot::observe(SignalId id) const noexcept
 {
     const auto index = detail::signalIndex(id);
@@ -72,12 +77,16 @@ std::optional<SignalObservation> SignalSnapshot::observe(SignalId id) const noex
     }
 
     const Cycle age = cycle_ - sample->receivedAt;
-    if (age == 0) {
-        return SignalObservation{sample, age, Freshness::fresh};
-    }
-    const auto freshness = age <= signalCatalog[*index].toleratedMissingCycles
-        ? Freshness::retained : Freshness::expired;
-    return SignalObservation{sample, age, freshness};
+    const auto freshness = age == 0 ? Freshness::fresh
+        : age <= config_.maxAgeCycles ? Freshness::retained : Freshness::expired;
+    const auto status = freshness == Freshness::expired ? SignalStatus::missing
+        : sample->quality == SampleQuality::in_range ? SignalStatus::valid : SignalStatus::invalid;
+    return SignalObservation{sample, age, freshness, status};
+}
+
+Gateway::Gateway(GatewayConfig config) noexcept
+{
+    current_.config_ = config;
 }
 
 SignalSnapshot Gateway::snapshot() const noexcept

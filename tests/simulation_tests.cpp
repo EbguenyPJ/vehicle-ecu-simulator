@@ -218,6 +218,8 @@ struct Tick {
 
 void expectSameTick(const Tick& first, const SignalSnapshot& snapshot, const ControlResult& result)
 {
+    require(first.snapshot.config().maxAgeCycles == snapshot.config().maxAgeCycles,
+            "a second run must reproduce the Gateway configuration");
     require(first.snapshot.cycle() == snapshot.cycle() && first.control.cycle == result.cycle &&
                 first.control.state == result.state && first.control.action == result.action &&
                 std::equal(first.control.diagnostics.begin(), first.control.diagnostics.end(),
@@ -234,9 +236,10 @@ void expectSameTick(const Tick& first, const SignalSnapshot& snapshot, const Con
     for (const auto& descriptor : signalCatalog) {
         const auto original = observationOf(first.snapshot, descriptor.id);
         const auto repeated = observationOf(snapshot, descriptor.id);
-        require(original.freshness == repeated.freshness && original.age == repeated.age &&
+        require(original.status == repeated.status && original.freshness == repeated.freshness &&
+                    original.age == repeated.age &&
                     original.sample.has_value() == repeated.sample.has_value(),
-                "a second run must reproduce the presence and freshness of each sample");
+                "a second run must reproduce the status, presence and freshness of each sample");
         if (original.sample) {
             require(original.sample->value == repeated.sample->value &&
                         original.sample->quality == repeated.sample->quality &&
@@ -274,6 +277,7 @@ void integration()
             for (const auto& descriptor : signalCatalog) {
                 const auto observation = observationOf(snapshot, descriptor.id);
                 require(observation.sample && observation.sample->receivedAt == 13 && observation.age == age &&
+                            observation.status == (cycle == 17 ? SignalStatus::missing : SignalStatus::valid) &&
                             observation.freshness == (cycle == 17 ? Freshness::expired : Freshness::retained),
                         "blackout must retain all samples until the fourth omitted tick expires them");
             }

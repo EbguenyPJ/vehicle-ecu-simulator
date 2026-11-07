@@ -48,7 +48,8 @@ if(BUILD_TESTING)
     target_link_libraries(gateway_tests PRIVATE ecu_gateway)
     ecu_enable_warnings(gateway_tests)
 
-    foreach(test_case IN ITEMS catalog_and_range freshness malformed_batch snapshot cycle_order)
+    foreach(test_case IN ITEMS catalog_and_range freshness malformed_batch snapshot cycle_order
+                               status configurable_freshness configuration_ownership)
         add_test(NAME gateway.${test_case} COMMAND gateway_tests ${test_case})
     endforeach()
 

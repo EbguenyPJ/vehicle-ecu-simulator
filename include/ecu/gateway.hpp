@@ -7,6 +7,11 @@
 
 namespace ecu {
 
+struct GatewayConfig {
+    // Límite inclusivo de edad para todas las señales. Cero exige recepción en el ciclo actual.
+    Cycle maxAgeCycles{3};
+};
+
 enum class InsertResult {
     inserted,
     duplicate_id,
@@ -41,8 +46,9 @@ class SignalSnapshot {
 public:
     [[nodiscard]] Cycle cycle() const noexcept;
     [[nodiscard]] InputDiagnostics diagnostics() const noexcept;
+    [[nodiscard]] GatewayConfig config() const noexcept;
 
-    // Devuelve nullopt para un ID desconocido. Una señal sin muestra conserva su observación.
+    // Devuelve nullopt para un ID desconocido. La observación incluye VALID/INVALID/MISSING.
     [[nodiscard]] std::optional<SignalObservation> observe(SignalId id) const noexcept;
 
 private:
@@ -51,10 +57,15 @@ private:
     std::array<std::optional<SignalSample>, signalCount> samples_{};
     InputDiagnostics diagnostics_{};
     Cycle cycle_{0};
+    GatewayConfig config_{};
 };
 
 class Gateway {
 public:
+    Gateway() noexcept = default;
+    // La configuración se copia; las instantáneas conservan su propia política temporal.
+    explicit Gateway(GatewayConfig config) noexcept;
+
     [[nodiscard]] SignalSnapshot snapshot() const noexcept;
 
     // El ciclo 0 describe el arranque. Un ciclo repetido o anterior se rechaza sin cambios.

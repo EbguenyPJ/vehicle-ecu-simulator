@@ -10,6 +10,21 @@
 
 int main()
 {
+    ecu::Gateway gateway{ecu::GatewayConfig{0}};
+    ecu::SignalBatch batch;
+    batch.add(ecu::SignalId::battery_voltage, 13.8);
+    const auto received = gateway.processCycle(10, batch);
+    const auto expired = gateway.processCycle(11, ecu::SignalBatch{});
+    if (!received || !expired || received->config().maxAgeCycles != 0) {
+        return EXIT_FAILURE;
+    }
+    const auto valid = received->observe(ecu::SignalId::battery_voltage);
+    const auto missing = expired->observe(ecu::SignalId::battery_voltage);
+    if (!valid || !missing || valid->status != ecu::SignalStatus::valid ||
+        missing->status != ecu::SignalStatus::missing) {
+        return EXIT_FAILURE;
+    }
+
     ecu::Scenario scenario;
     if (!scenario.addDriveSegment(1, 0.0)) {
         return EXIT_FAILURE;
