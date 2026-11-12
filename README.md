@@ -75,7 +75,7 @@ vehicle-ecu-simulator/
 ├── src/                 Implementaciones y ejecutable de terminal
 ├── tests/               Pruebas de componentes, integración y consumidor CMake
 ├── docs/                Decisiones técnicas, eficiencia, escalamiento y formatos de registro
-└── benchmarks/          Instrumento de medida y muestras crudas
+└── benchmarks/          Instrumentos de medida y muestras originales
 ```
 
 Los targets `ecu_gateway`, `ecu_control`, `ecu_simulator`, `ecu_dashboard` y `ecu_scaling` permiten construir y verificar cada responsabilidad. `ecu_scaling` proporciona funciones puras independientes del procesamiento de Gateway y Control. El requisito C++17 se propaga a los consumidores mediante la interfaz pública de CMake.
@@ -419,6 +419,7 @@ El lector `CsvReader` recupera registros desde un flujo C++ y distingue fin de a
 | BIN-04   | Propagar fallos de flujo y conservar los registros completos previos. | `binary.stream_errors` |
 | BIN-05   | Recuperar los cinco escenarios y comprobar la equivalencia de los registros con CSV. | `binary.scenarios` |
 | BIN-06   | Leer un archivo binario generado por la CLI y comprobar el Dashboard y los errores de argumentos y ruta. | `binary.cli` |
+| PERF-01  | Verificar ambos archivos del benchmark, los tamaños y registros del informe y el rechazo de un destino existente. | `benchmark.logs` |
 | BUILD-01 | Compilar y enlazar las API públicas desde un consumidor CMake externo que solicita C++11, incluidos escalamiento, CSV y binario. | `build.consumer` |
 
 ## Pruebas y CI
@@ -427,14 +428,14 @@ La validación local registrada utiliza macOS 26.5 arm64, AppleClang 21.0.0 y CM
 
 | Configuración | Resultado local |
 | --- | --- |
-| Debug | 55/55 pruebas CTest aprobadas. |
-| Release, benchmark compilado | 55/55 pruebas CTest aprobadas. |
-| Debug con AddressSanitizer y UndefinedBehaviorSanitizer | 55/55 pruebas CTest aprobadas. |
+| Debug con benchmarks | 56/56 pruebas CTest aprobadas. |
+| Release con benchmarks | 56/56 pruebas CTest aprobadas. |
+| Debug con AddressSanitizer, UndefinedBehaviorSanitizer y benchmarks | 56/56 pruebas CTest aprobadas. |
 
 Para reproducir estas configuraciones desde la raíz del proyecto:
 
 ```sh
-cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DCMAKE_CXX_FLAGS=-Werror
+cmake -S . -B build/debug -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DECU_BUILD_BENCHMARKS=ON -DCMAKE_CXX_FLAGS=-Werror
 cmake --build build/debug --parallel
 (cd build/debug && ctest --output-on-failure)
 
@@ -442,7 +443,7 @@ cmake -S . -B build/release -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DECU_
 cmake --build build/release --parallel
 (cd build/release && ctest --output-on-failure)
 
-cmake -S . -B build/sanitizers -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON \
+cmake -S . -B build/sanitizers -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DECU_BUILD_BENCHMARKS=ON \
   '-DCMAKE_CXX_FLAGS=-Werror -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all'
 cmake --build build/sanitizers --parallel
 (cd build/sanitizers && ctest --output-on-failure)
@@ -466,11 +467,27 @@ La línea base previa fue revisada con Cppcheck 2.22.0 sobre `src/` y `benchmark
 
 El [workflow de CI](.github/workflows/ci.yml) configura compilación y pruebas en Debug y Release para Linux, macOS y Windows, además de ASan y UBSan en Linux.
 
+### Depuración en Debug
+
+El escenario `faults` completa el recorrido sin interacción. Para inspeccionar la entrada a Control con LLDB desde la raíz del proyecto, abre el ejecutable compilado en Debug.
+
+```sh
+lldb -- ./build/debug/vehicle-ecu-simulator faults --dashboard ascii
+```
+
+```text
+(lldb) breakpoint set --name ecu::ControlECU::step
+(lldb) run
+(lldb) frame variable event
+```
+
+La primera llamada muestra `event = none`. La llamada del último ciclo recibe `shutdown`.
+
 ## Rendimiento
 
-El benchmark mide por separado el núcleo y los formatos ASCII y braille del Dashboard con el escenario `faults`. Para compilar el instrumento de medición, habilita `ECU_BUILD_BENCHMARKS=ON` en Release.
+Habilita `ECU_BUILD_BENCHMARKS=ON` en Release para compilar los dos instrumentos de medida. `ecu-performance` mide por separado el núcleo y los formatos ASCII y braille del Dashboard. Su muestra del 6 de noviembre de 2026 corresponde a una versión anterior del Dashboard y del ciclo de vida de Control.
 
-Las muestras bajo `benchmarks/results/` son históricas: corresponden a una versión anterior del Dashboard y del ciclo de vida de Control. No describen el costo del autoexamen ni del apagado actuales.
+`ecu-log-performance` mide tamaño y tiempos de escritura y lectura de CSV y ECUB con los mismos registros. En la medición local, ECUB ocupó 56,83 % menos y su lectura mediana tomó 31,60 % menos tiempo. CSV tuvo la menor mediana de escritura. [Metodología, resultados y alternativa con SQLite](docs/rendimiento_registros.md)
 
 ## Alcance
 

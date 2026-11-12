@@ -52,15 +52,28 @@ add_executable(vehicle-ecu-simulator src/main.cpp)
 target_link_libraries(vehicle-ecu-simulator PRIVATE ecu_simulator ecu_dashboard ecu_csv ecu_binary)
 ecu_enable_warnings(vehicle-ecu-simulator)
 
-option(ECU_BUILD_BENCHMARKS "Build the reproducible core and Dashboard benchmark" OFF)
+option(ECU_BUILD_BENCHMARKS "Build the core, Dashboard and log benchmarks" OFF)
 if(ECU_BUILD_BENCHMARKS)
     add_executable(ecu-performance benchmarks/performance.cpp)
     target_link_libraries(ecu-performance PRIVATE ecu_simulator ecu_dashboard)
     ecu_enable_warnings(ecu-performance)
+
+    add_executable(ecu-log-performance benchmarks/log_performance.cpp)
+    target_link_libraries(ecu-log-performance PRIVATE ecu_csv ecu_binary ecu_simulator)
+    target_include_directories(ecu-log-performance PRIVATE tests)
+    ecu_enable_warnings(ecu-log-performance)
 endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    if(ECU_BUILD_BENCHMARKS)
+        add_test(NAME benchmark.logs COMMAND "${CMAKE_COMMAND}"
+            "-DECU_LOG_BENCHMARK=$<TARGET_FILE:ecu-log-performance>"
+            "-DECU_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/log-benchmark/$<CONFIG>"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_log_benchmark.cmake")
+        set_tests_properties(benchmark.logs PROPERTIES TIMEOUT 10)
+    endif()
+
     add_executable(binary_tests tests/binary_tests.cpp)
     target_link_libraries(binary_tests PRIVATE ecu_binary ecu_csv ecu_simulator)
     ecu_enable_warnings(binary_tests)
