@@ -99,5 +99,20 @@ constexpr std::optional<std::size_t> signalIndex(SignalId id) noexcept
     return index;
 }
 
+// Una muestra presente debe tener un ciclo de recepción menor o igual al consultado.
+inline SignalObservation observeSample(const std::optional<SignalSample>& sample,
+                                       Cycle cycle, Cycle maxAgeCycles) noexcept
+{
+    if (!sample) {
+        return {};
+    }
+    const Cycle age = cycle - sample->receivedAt;
+    const auto freshness = age == 0 ? Freshness::fresh
+        : age <= maxAgeCycles ? Freshness::retained : Freshness::expired;
+    const auto status = freshness == Freshness::expired ? SignalStatus::missing
+        : sample->quality == SampleQuality::in_range ? SignalStatus::valid : SignalStatus::invalid;
+    return {sample, age, freshness, status};
+}
+
 }  // namespace detail
 }  // namespace ecu

@@ -6,6 +6,8 @@ Gateway publica `VALID`, `INVALID` y `MISSING` con una antigüedad máxima confi
 
 El módulo de escalamiento convierte temperatura y voltaje de batería entre unidades físicas y códigos enteros sin signo. Expone los límites representables y el resultado de saturación, sin modificar las mediciones ni las decisiones de las ECU.
 
+El Logger CSV guarda las observaciones de Gateway y el resultado de Control de cada ciclo. El lector recupera ambos en un `CycleRecord`. [Contrato del registro CSV](docs/registro_csv.md)
+
 ## Compilación y pruebas
 
 Ejecuta estos comandos desde la raíz del proyecto en un shell POSIX. Se requiere CMake 3.16 o posterior y un compilador C++17.
@@ -16,7 +18,7 @@ cmake --build build --config Debug
 (cd build && ctest -C Debug --output-on-failure)
 ```
 
-Con un generador de configuración única, la sintaxis del ejecutable es `./build/vehicle-ecu-simulator [nominal|faults|battery-fault|oil-fault|temperature-dropout] [--dashboard auto|ascii|braille]`. Por ejemplo, puedes ejecutar el recorrido nominal con el formato automático, guardar un registro ASCII o solicitar los relojes braille explícitamente.
+Con un generador de configuración única, el ejecutable admite `./build/vehicle-ecu-simulator [nominal|faults|battery-fault|oil-fault|temperature-dropout] [--dashboard auto|ascii|braille] [--csv ARCHIVO]`.
 
 ```sh
 ./build/vehicle-ecu-simulator nominal
@@ -25,6 +27,7 @@ Con un generador de configuración única, la sintaxis del ejecutable es `./buil
 ./build/vehicle-ecu-simulator battery-fault --dashboard ascii
 ./build/vehicle-ecu-simulator oil-fault --dashboard ascii
 ./build/vehicle-ecu-simulator temperature-dropout --dashboard ascii
+./build/vehicle-ecu-simulator faults --csv "recorrido con fallas.csv"
 ```
 
 El escenario predeterminado es `nominal` y el formato predeterminado es `auto`. En macOS y Linux, `auto` selecciona braille si la salida es una terminal de al menos 80 columnas y la configuración regional indica UTF-8. Usa ASCII en una terminal más estrecha, al redirigir la salida o si la capacidad de la terminal no puede confirmarse. En otros entornos, la selección automática usa ASCII. La opción explícita `--dashboard braille` genera UTF-8 incluso con la salida redirigida.
@@ -39,6 +42,9 @@ flowchart LR
     G -->|SignalSnapshot del ciclo| C[ControlECU]
     G -->|Misma instantánea| D[renderDashboard]
     C -->|ControlResult| D
+    G -->|Instantánea| R[CycleRecord]
+    C -->|Resultado| R
+    R -->|Observador| L[Logger CSV opcional]
 ```
 
 `runScenario` posee los componentes durante la ejecución y entrega al observador la instantánea que acaba de evaluar Control. El Dashboard lee esa misma instancia durante su llamada. El núcleo usa almacenamiento de capacidad fija. El texto y la codificación de terminal pertenecen a `ecu_dashboard`.
@@ -52,6 +58,8 @@ flowchart LR
 | `ControlECU` | Diagnósticos, máquina de estados y acción simulada. |
 | `LinearScale`, `encodePhysical` y `decodeRaw` | Conversión física/cruda, cuantización y saturación explícita. |
 | `renderDashboard` | Vistas ASCII y braille del ciclo y del resultado de Control. |
+| `CycleRecord` y `recordObserver` | Captura del mismo ciclo para un destino de registros. |
+| `CsvWriter` y `CsvReader` | Escritura y lectura del registro por ciclo mediante flujos C++. |
 | `runScenario` y `main` | Orden del recorrido, selección del escenario y salida. |
 
 ## Estructura del repositorio
@@ -64,11 +72,13 @@ vehicle-ecu-simulator/
 ├── include/ecu/          Contratos públicos de señales y componentes
 ├── src/                 Implementaciones y ejecutable de terminal
 ├── tests/               Pruebas de componentes, integración y consumidor CMake
-├── docs/                Decisiones técnicas, eficiencia y escalamiento
+├── docs/                Decisiones técnicas, eficiencia, escalamiento y registro CSV
 └── benchmarks/          Instrumento de medida y muestras crudas
 ```
 
 Los targets `ecu_gateway`, `ecu_control`, `ecu_simulator`, `ecu_dashboard` y `ecu_scaling` permiten construir y verificar cada responsabilidad. `ecu_scaling` proporciona funciones puras independientes del procesamiento de Gateway y Control. El requisito C++17 se propaga a los consumidores mediante la interfaz pública de CMake.
+
+`ecu_record` expone el registro común. `ecu_csv` proporciona el lector y el escritor y enlaza el registro como dependencia pública.
 
 ## STL utilizado
 
@@ -337,6 +347,12 @@ Después de las señales, ambas vistas y el formato compacto muestran un resumen
 
 La sección de Control muestra el estado, la acción simulada y todos los diagnósticos del ciclo. La causa y el ciclo originales del enclavamiento aparecen por separado. En el ciclo 18 de `faults`, las señales recuperan su frescura y Control sigue en `SAFE_STATE` con la causa del ciclo 17. En el 20, la sobretemperatura aparece como diagnóstico activo junto a esa misma causa enclavada. El último cuadro muestra `SHUTDOWN` con salida inhibida y conserva esa misma causa enclavada. Ambos formatos escriben un cuadro por ciclo en secuencia, sin códigos ANSI ni pausas.
 
+## Registro CSV
+
+`--csv ARCHIVO` escribe una fila por ciclo con las mediciones físicas, sus resultados y la decisión de Control. La opción reemplaza el contenido del archivo indicado si ya existe. El ejecutable informa errores de apertura, escritura o cierre. Si el destino rechaza una fila, el observador detiene el recorrido en ese ciclo.
+
+El lector `CsvReader` recupera registros desde un flujo C++ y distingue fin de archivo, registro válido y error con su número de línea. El esquema conserva calidad, antigüedad, diagnósticos y causas enclavadas. [Uso del lector y formato de columnas](docs/registro_csv.md)
+
 ## Cobertura de pruebas
 
 | ID       | Comportamiento comprobado                                                                                                                                                       | Caso de CTest               |
@@ -382,7 +398,14 @@ La sección de Control muestra el estado, la acción simulada y todos los diagn�
 | SCAL-04  | Rechazar parámetros inválidos, valores físicos no finitos y códigos fuera del ancho declarado.                                                                                  | `scaling.invalid_input`      |
 | SCAL-05  | Recorrer todos los códigos de los dos perfiles y comprobar ida y vuelta y tolerancia de cuantización.                                                                          | `scaling.round_trip`         |
 | SCAL-06  | Conservar valores, calidad, presencia y resultados de Gateway al consultar la representación escalada.                                                                          | `scaling.observations`       |
-| BUILD-01 | Propagar C++17 y enlace a un consumidor externo que solicita un estándar anterior; verificar Gateway, Control, renderizado y conversiones físicas/crudas con saturación y límites. | `build.consumer`            |
+| CSV-01   | Capturar observaciones y decisiones del mismo ciclo en un registro propio. | `csv.record` |
+| CSV-02   | Recuperar valores físicos, ausencias, signos, diagnósticos y límites numéricos con independencia de locale. | `csv.round_trip` |
+| CSV-03   | Rechazar cabeceras y filas malformadas con su número de línea y conservar el último registro entregado. | `csv.malformed` |
+| CSV-04   | Propagar escrituras parciales, fallos de vaciado y errores de lectura. | `csv.stream_errors` |
+| CSV-05   | Capturar registros con un fake y detener el recorrido en el ciclo del fallo del destino. | `csv.observer_failure` |
+| CSV-06   | Escribir y recuperar los cinco escenarios completos, con el orden de diagnósticos y la causa enclavada. | `csv.scenarios` |
+| CSV-07   | Guardar y leer un archivo real desde la CLI, comprobar errores de ruta y conservar la salida del Dashboard. | `csv.cli` |
+| BUILD-01 | Compilar y enlazar las API públicas desde un consumidor CMake externo que solicita C++11, incluidos escalamiento y CSV. | `build.consumer` |
 
 ## Pruebas y CI
 
@@ -390,9 +413,9 @@ La validación local registrada utiliza macOS 26.5 arm64, AppleClang 21.0.0 y CM
 
 | Configuración | Resultado local |
 | --- | --- |
-| Debug | 42/42 pruebas CTest aprobadas. |
-| Release, benchmark compilado | 42/42 pruebas CTest aprobadas. |
-| Debug con AddressSanitizer y UndefinedBehaviorSanitizer | 42/42 pruebas CTest aprobadas. |
+| Debug | 49/49 pruebas CTest aprobadas. |
+| Release, benchmark compilado | 49/49 pruebas CTest aprobadas. |
+| Debug con AddressSanitizer y UndefinedBehaviorSanitizer | 49/49 pruebas CTest aprobadas. |
 
 Para reproducir estas configuraciones desde la raíz del proyecto:
 
@@ -419,7 +442,11 @@ Para comprobar en conjunto búsquedas, validación, conteos y presentación: `(c
 
 Para comprobar perfiles, redondeo, saturación y límites representables: `(cd build/debug && ctest -R '^scaling\.' --output-on-failure)`.
 
+Las pruebas del registro y del CSV se ejecutan con `(cd build/debug && ctest -R '^csv\.' --output-on-failure)`.
+
 La prueba `build.consumer` crea un proyecto externo que solicita C++11, incluye las cabeceras públicas y enlaza las bibliotecas. CMake eleva su estándar a C++17 mediante el requisito público del target. El consumidor verifica una Gateway con límite cero, conserva una instantánea válida tras la caducidad posterior y comprueba un escenario de tres ciclos con `SELF_TEST → OPERATIONAL → SHUTDOWN` y renderizado. También utiliza directamente el evento de apagado y comprueba su cierre terminal. Al enlazar `ecu_scaling`, verifica los perfiles, la conversión de temperatura y batería, la saturación explícita y el rechazo de un crudo que excede los ocho bits de batería.
+
+El consumidor enlaza también `ecu_csv` y recupera el resultado de apagado que guardó en un registro CSV.
 
 La línea base previa fue revisada con Cppcheck 2.22.0 sobre `src/` y `benchmarks/`, sin diagnósticos de tipo warning, performance o portability.
 
@@ -433,4 +460,4 @@ Las muestras bajo `benchmarks/results/` son históricas: corresponden a una vers
 
 ## Alcance
 
-El sistema integra el simulador, Gateway, Control, el coordinador de escenarios, el Dashboard de terminal y sus pruebas en CTest. El ciclo representa tiempo simulado y las acciones de Control se publican como parte de su resultado. La cadencia física de muestreo y cualquier adaptador de bus requieren contratos propios.
+El sistema integra el simulador, Gateway, Control, el coordinador de escenarios, el Dashboard de terminal, el registro CSV y sus pruebas en CTest. El ciclo representa tiempo simulado y las acciones de Control se publican como parte de su resultado. La cadencia física de muestreo y cualquier adaptador de bus requieren contratos propios.

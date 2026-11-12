@@ -1,4 +1,5 @@
 #include "ecu/control.hpp"
+#include "ecu/csv.hpp"
 #include "ecu/dashboard.hpp"
 #include "ecu/gateway.hpp"
 #include "ecu/scaling.hpp"
@@ -71,6 +72,19 @@ int main()
     }
     const auto stopped = terminal.step(*received, ecu::ControlEvent::shutdown);
     if (!stopped || stopped->state != ecu::ControlState::shutdown || terminal.reset() || terminal.step(*expired)) {
+        return EXIT_FAILURE;
+    }
+    const auto record = ecu::makeRecord(*received, *stopped);
+    std::ostringstream csvOutput;
+    ecu::CsvWriter writer(csvOutput);
+    if (!record || !writer.write(*record) || !writer.finish()) {
+        return EXIT_FAILURE;
+    }
+    std::istringstream csvInput(csvOutput.str());
+    ecu::CsvReader reader(csvInput);
+    ecu::CycleRecord decoded;
+    if (reader.read(decoded) != ecu::CsvReadStatus::record || decoded.cycle != received->cycle() ||
+        decoded.state != ecu::ControlState::shutdown || reader.read(decoded) != ecu::CsvReadStatus::end) {
         return EXIT_FAILURE;
     }
     return completed && rendered && lifecycleMatches && seen == 3 && !output.str().empty()

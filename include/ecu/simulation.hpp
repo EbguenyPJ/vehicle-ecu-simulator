@@ -1,11 +1,14 @@
 #pragma once
 
+#include <type_traits>
+
 #include "ecu/control.hpp"
 #include "ecu/simulator.hpp"
 
 namespace ecu {
 
 // El observador recibe datos del mismo ciclo válidos durante la llamada.
+// Un retorno bool igual a false detiene el recorrido y se propaga al llamador.
 // El último ciclo declarado solicita el apagado de Control, sin añadir otro ciclo.
 template <typename Observer>
 [[nodiscard]] bool runScenario(const Scenario& scenario, Observer&& observe)
@@ -43,7 +46,14 @@ template <typename Observer>
         if (!result) {
             return false;
         }
-        observe(*snapshot, *result);
+        using ObservationResult = std::invoke_result_t<Observer&, const SignalSnapshot&, const ControlResult&>;
+        if constexpr (std::is_same_v<ObservationResult, bool>) {
+            if (!observe(*snapshot, *result)) {
+                return false;
+            }
+        } else {
+            observe(*snapshot, *result);
+        }
     }
     return true;
 }

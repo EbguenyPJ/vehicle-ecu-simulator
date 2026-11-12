@@ -72,17 +72,7 @@ std::optional<SignalObservation> SignalSnapshot::observe(SignalId id) const noex
         return std::nullopt;
     }
 
-    const auto& sample = samples_[*index];
-    if (!sample) {
-        return SignalObservation{};
-    }
-
-    const Cycle age = cycle_ - sample->receivedAt;
-    const auto freshness = age == 0 ? Freshness::fresh
-        : age <= config_.maxAgeCycles ? Freshness::retained : Freshness::expired;
-    const auto status = freshness == Freshness::expired ? SignalStatus::missing
-        : sample->quality == SampleQuality::in_range ? SignalStatus::valid : SignalStatus::invalid;
-    return SignalObservation{sample, age, freshness, status};
+    return detail::observeSample(samples_[*index], cycle_, config_.maxAgeCycles);
 }
 
 std::size_t SignalSnapshot::count(SignalStatus status) const noexcept

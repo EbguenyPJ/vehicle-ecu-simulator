@@ -54,6 +54,7 @@ struct Diagnostic {
 
 class Diagnostics {
 public:
+    static constexpr std::size_t capacity = signalCount + 1;
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
     [[nodiscard]] const Diagnostic* begin() const noexcept { return findings_.data(); }
     [[nodiscard]] const Diagnostic* end() const noexcept { return begin() + size_; }
@@ -66,7 +67,7 @@ private:
              std::optional<SignalId> signal = std::nullopt) noexcept;
 
     // Como máximo un hallazgo por canal más uno de plausibilidad.
-    std::array<Diagnostic, signalCount + 1> findings_{};
+    std::array<Diagnostic, capacity> findings_{};
     std::size_t size_{0};
 };
 
