@@ -36,6 +36,10 @@ add_library(ecu_csv STATIC src/csv.cpp)
 target_link_libraries(ecu_csv PUBLIC ecu_record)
 ecu_enable_warnings(ecu_csv)
 
+add_library(ecu_binary STATIC src/binary.cpp)
+target_link_libraries(ecu_binary PUBLIC ecu_record PRIVATE ecu_scaling)
+ecu_enable_warnings(ecu_binary)
+
 add_library(ecu_simulator STATIC src/simulator.cpp)
 target_link_libraries(ecu_simulator PUBLIC ecu_gateway)
 ecu_enable_warnings(ecu_simulator)
@@ -45,7 +49,7 @@ target_link_libraries(ecu_dashboard PUBLIC ecu_control)
 ecu_enable_warnings(ecu_dashboard)
 
 add_executable(vehicle-ecu-simulator src/main.cpp)
-target_link_libraries(vehicle-ecu-simulator PRIVATE ecu_simulator ecu_dashboard ecu_csv)
+target_link_libraries(vehicle-ecu-simulator PRIVATE ecu_simulator ecu_dashboard ecu_csv ecu_binary)
 ecu_enable_warnings(vehicle-ecu-simulator)
 
 option(ECU_BUILD_BENCHMARKS "Build the reproducible core and Dashboard benchmark" OFF)
@@ -57,6 +61,20 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(binary_tests tests/binary_tests.cpp)
+    target_link_libraries(binary_tests PRIVATE ecu_binary ecu_csv ecu_simulator)
+    ecu_enable_warnings(binary_tests)
+
+    foreach(test_case IN ITEMS reference_bytes round_trip malformed stream_errors scenarios)
+        add_test(NAME binary.${test_case} COMMAND binary_tests ${test_case})
+    endforeach()
+    add_test(NAME binary.cli COMMAND "${CMAKE_COMMAND}"
+        "-DECU_EXECUTABLE=$<TARGET_FILE:vehicle-ecu-simulator>"
+        "-DECU_BINARY_TESTS=$<TARGET_FILE:binary_tests>"
+        "-DECU_TEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/binary-cli/$<CONFIG>"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_binary_cli.cmake")
+    set_tests_properties(binary.cli PROPERTIES TIMEOUT 10)
+
     add_executable(csv_tests tests/csv_tests.cpp)
     target_link_libraries(csv_tests PRIVATE ecu_csv ecu_simulator)
     ecu_enable_warnings(csv_tests)

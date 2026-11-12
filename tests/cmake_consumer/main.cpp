@@ -1,3 +1,4 @@
+#include "ecu/binary.hpp"
 #include "ecu/control.hpp"
 #include "ecu/csv.hpp"
 #include "ecu/dashboard.hpp"
@@ -85,6 +86,17 @@ int main()
     ecu::CycleRecord decoded;
     if (reader.read(decoded) != ecu::CsvReadStatus::record || decoded.cycle != received->cycle() ||
         decoded.state != ecu::ControlState::shutdown || reader.read(decoded) != ecu::CsvReadStatus::end) {
+        return EXIT_FAILURE;
+    }
+    std::ostringstream binaryOutput(std::ios::binary);
+    ecu::BinaryWriter binaryWriter(binaryOutput);
+    if (!binaryWriter.write(*record) || !binaryWriter.finish()) {
+        return EXIT_FAILURE;
+    }
+    std::istringstream binaryInput(binaryOutput.str(), std::ios::binary);
+    ecu::BinaryReader binaryReader(binaryInput);
+    if (binaryReader.read(decoded) != ecu::BinaryReadStatus::record || decoded.cycle != received->cycle() ||
+        decoded.state != ecu::ControlState::shutdown || binaryReader.read(decoded) != ecu::BinaryReadStatus::end) {
         return EXIT_FAILURE;
     }
     return completed && rendered && lifecycleMatches && seen == 3 && !output.str().empty()

@@ -1,3 +1,4 @@
+#include "ecu/binary.hpp"
 #include "ecu/csv.hpp"
 #include "ecu/dashboard.hpp"
 #include "ecu/simulation.hpp"
@@ -19,12 +20,15 @@ namespace {
 
 constexpr std::string_view usage =
     "Uso: vehicle-ecu-simulator [nominal|faults|battery-fault|oil-fault|temperature-dropout] "
-    "[--dashboard auto|ascii|braille] [--csv ARCHIVO]\n";
+    "[--dashboard auto|ascii|braille] [--csv ARCHIVO | --binary ARCHIVO]\n";
+
+enum class LogFormat { csv, binary };
 
 struct Options {
     ecu::ScenarioKind scenario{ecu::ScenarioKind::nominal};
     std::optional<ecu::DashboardFormat> dashboard;
-    const char* csvPath{nullptr};
+    const char* logPath{nullptr};
+    LogFormat logFormat{LogFormat::csv};
 };
 
 std::optional<Options> parseOptions(int argc, char* argv[])
@@ -47,15 +51,16 @@ std::optional<Options> parseOptions(int argc, char* argv[])
             } else if (format != "auto") {
                 return std::nullopt;
             }
-        } else if (arg == "--csv") {
-            if (options.csvPath || index + 1 == argc) {
+        } else if (arg == "--csv" || arg == "--binary") {
+            if (options.logPath || index + 1 == argc) {
                 return std::nullopt;
             }
             const std::string_view path = argv[++index];
             if (path.empty() || path.substr(0, 2) == "--") {
                 return std::nullopt;
             }
-            options.csvPath = argv[index];
+            options.logPath = argv[index];
+            options.logFormat = arg == "--csv" ? LogFormat::csv : LogFormat::binary;
         } else if (!scenarioSeen) {
             if (arg == "nominal") {
                 options.scenario = ecu::ScenarioKind::nominal;
@@ -107,6 +112,43 @@ TerminalOutput detectTerminal()
     return terminal;
 }
 
+template <typename Writer, typename Render, typename ErrorMessage>
+bool runWithLog(const ecu::Scenario& scenario, const char* path, std::string_view format,
+                const Render& render, ErrorMessage describe)
+{
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        std::cerr << "No se pudo abrir el archivo " << format << ' ' << path << ".\n";
+        return false;
+    }
+    Writer writer(file);
+    const auto log = ecu::recordObserver(writer);
+    bool writingOk = true;
+    const auto completed = ecu::runScenario(scenario, [&](const ecu::SignalSnapshot& snapshot,
+                                                          const ecu::ControlResult& control) {
+        writingOk = log(snapshot, control);
+        if (writingOk) {
+            render(snapshot, control);
+        }
+        return writingOk;
+    });
+    const bool flushed = writer.finish();
+    file.close();
+    if (!writingOk || !flushed || !file) {
+        auto error = writer.error();
+        using Error = decltype(error);
+        if (error == Error::none) {
+            error = writingOk ? Error::io_error : Error::invalid_record;
+        }
+        std::cerr << "No se pudo guardar el archivo " << format << " (" << describe(error) << ").\n";
+        return false;
+    }
+    if (!completed) {
+        std::cerr << "No se pudo completar el escenario.\n";
+    }
+    return completed;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[])
@@ -130,44 +172,21 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    std::ofstream csvFile;
-    if (options->csvPath) {
-        csvFile.open(options->csvPath, std::ios::binary | std::ios::trunc);
-        if (!csvFile) {
-            std::cerr << "No se pudo abrir el archivo CSV " << options->csvPath << ".\n";
-            return EXIT_FAILURE;
-        }
-    }
-    ecu::CsvWriter csv(csvFile);
-    const auto log = ecu::recordObserver(csv);
-
     bool outputOk = true;
-    bool recordingOk = true;
-    const auto observe = [&](const ecu::SignalSnapshot& snapshot, const ecu::ControlResult& control) {
-        if (options->csvPath && !log(snapshot, control)) {
-            recordingOk = false;
-            return false;
-        }
+    const auto render = [&](const ecu::SignalSnapshot& snapshot, const ecu::ControlResult& control) {
         if (outputOk) {
             outputOk = ecu::renderDashboard(std::cout, snapshot, control, format, terminal.columns);
         }
-        return true;
     };
 
-    const bool completed = ecu::runScenario(*scenario, observe);
-    if (options->csvPath) {
-        const bool flushed = csv.finish();
-        csvFile.close();
-        if (!recordingOk || !flushed || !csvFile) {
-            auto error = csv.error();
-            if (error == ecu::CsvError::none) {
-                error = recordingOk ? ecu::CsvError::io_error : ecu::CsvError::invalid_record;
-            }
-            std::cerr << "No se pudo guardar el CSV (" << ecu::csvErrorMessage(error) << ").\n";
+    if (options->logPath) {
+        const bool completed = options->logFormat == LogFormat::csv
+            ? runWithLog<ecu::CsvWriter>(*scenario, options->logPath, "CSV", render, ecu::csvErrorMessage)
+            : runWithLog<ecu::BinaryWriter>(*scenario, options->logPath, "binario", render, ecu::binaryErrorMessage);
+        if (!completed) {
             return EXIT_FAILURE;
         }
-    }
-    if (!completed) {
+    } else if (!ecu::runScenario(*scenario, render)) {
         std::cerr << "No se pudo completar el escenario.\n";
         return EXIT_FAILURE;
     }
