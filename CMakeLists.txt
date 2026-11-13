@@ -49,7 +49,8 @@ target_link_libraries(ecu_dashboard PUBLIC ecu_control)
 ecu_enable_warnings(ecu_dashboard)
 
 add_executable(vehicle-ecu-simulator src/main.cpp)
-target_link_libraries(vehicle-ecu-simulator PRIVATE ecu_simulator ecu_dashboard ecu_csv ecu_binary)
+find_package(Threads REQUIRED)
+target_link_libraries(vehicle-ecu-simulator PRIVATE ecu_simulator ecu_dashboard ecu_csv ecu_binary Threads::Threads)
 ecu_enable_warnings(vehicle-ecu-simulator)
 
 option(ECU_BUILD_BENCHMARKS "Build the core, Dashboard and log benchmarks" OFF)
@@ -147,7 +148,7 @@ if(BUILD_TESTING)
     target_link_libraries(dashboard_tests PRIVATE ecu_dashboard ecu_simulator)
     ecu_enable_warnings(dashboard_tests)
 
-    foreach(test_case IN ITEMS ascii braille pipeline lifecycle summary)
+    foreach(test_case IN ITEMS ascii braille live pipeline lifecycle summary)
         add_test(NAME dashboard.${test_case} COMMAND dashboard_tests ${test_case})
     endforeach()
 

@@ -1,5 +1,6 @@
 #include "ecu/dashboard.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <iomanip>
@@ -181,6 +182,14 @@ std::optional<double> dialValue(const SignalSnapshot& snapshot, SignalId id)
     return observation->sample->value;
 }
 
+std::optional<double> scaleFraction(const std::optional<double>& value, const SignalDescriptor& scale)
+{
+    if (!value) {
+        return std::nullopt;
+    }
+    return (*value - scale.minimum) / (scale.maximum - scale.minimum);
+}
+
 void writeCentered(std::ostream& out, std::string_view text)
 {
     constexpr auto width = detail::brailleDialWidth;
@@ -208,15 +217,8 @@ void writeDials(std::ostream& out, const SignalSnapshot& snapshot)
     static const auto speedMaximum = formatValue(speedScale.maximum);
     static const auto rpmMinimum = formatValue(rpmScale.minimum);
     static const auto rpmMaximum = formatValue(rpmScale.maximum);
-    const auto fraction = [](const std::optional<double>& value, const SignalDescriptor& scale)
-        -> std::optional<double> {
-        if (!value) {
-            return std::nullopt;
-        }
-        return (*value - scale.minimum) / (scale.maximum - scale.minimum);
-    };
-    const auto speedDial = detail::drawBrailleDial(fraction(speed, speedScale));
-    const auto rpmDial = detail::drawBrailleDial(fraction(rpm, rpmScale));
+    const auto speedDial = detail::drawBrailleDial(scaleFraction(speed, speedScale));
+    const auto rpmDial = detail::drawBrailleDial(scaleFraction(rpm, rpmScale));
 
     constexpr std::string_view gap = "    ";
     writeCentered(out, "VELOCIDAD");
@@ -272,6 +274,173 @@ void writeControl(std::ostream& out, const ControlResult& control)
     }
 }
 
+// Cada glifo del panel ocupa una columna en una fuente monoespaciada.
+constexpr std::size_t panelWidth = dashboardMinBrailleColumns - 3;
+constexpr std::size_t dialGap = panelWidth - 2 * detail::brailleDialWidth;
+constexpr std::size_t gaugeWidth = 14;
+constexpr std::string_view reset = "\033[0m";
+constexpr std::string_view dim = "\033[90m";
+constexpr std::string_view green = "\033[92m";
+constexpr std::string_view amber = "\033[93m";
+constexpr std::string_view red = "\033[91m";
+
+std::string_view signalColor(const SignalObservation& observation) noexcept
+{
+    if (observation.status == SignalStatus::invalid) {
+        return red;
+    }
+    return observation.freshness == Freshness::fresh ? green : amber;
+}
+
+std::string_view stateBadge(ControlState state) noexcept
+{
+    switch (state) {
+    case ControlState::init: return "\033[97;100m";
+    case ControlState::self_test: return "\033[97;44m";
+    case ControlState::operational: return "\033[30;102m";
+    case ControlState::degraded: return "\033[30;103m";
+    case ControlState::safe_state: return "\033[97;41m";
+    case ControlState::shutdown: return "\033[97;45m";
+    }
+    return reset;
+}
+
+void writePanelLine(std::ostream& out, std::string_view line)
+{
+    out << dim << u8"\u2502" << reset << line << std::string(panelWidth - line.size(), ' ')
+        << dim << u8"\u2502" << reset << '\n';
+}
+
+void writePanelBorder(std::ostream& out, std::string_view left, std::string_view right)
+{
+    out << dim << left;
+    for (std::size_t column = 0; column < panelWidth; ++column) {
+        out << u8"\u2500";
+    }
+    out << right << reset << '\n';
+}
+
+// Las filas de instrumentos usan anchos fijos y sus secuencias SGR ocupan cero columnas.
+void writeInstrumentRow(std::ostream& out, std::string_view left, std::string_view center,
+                        std::string_view right, std::string_view leftColor = reset,
+                        std::string_view centerColor = reset, std::string_view rightColor = reset)
+{
+    out << dim << u8"\u2502" << leftColor << left
+        << std::string((dialGap - center.size()) / 2, ' ')
+        << centerColor << center
+        << std::string((dialGap - center.size() + 1) / 2, ' ')
+        << rightColor << right << dim << u8"\u2502" << reset << '\n';
+}
+
+std::string dialCaption(const SignalObservation& observation, std::string_view unit)
+{
+    const auto value = observation.sample ? formatValue(observation.sample->value) : "---";
+    return value + ' ' + std::string(unit) + ' ' + std::string(statusName(observation.status));
+}
+
+void writeLiveDials(std::ostream& out, const SignalSnapshot& snapshot)
+{
+    const auto& speed = signalCatalog[static_cast<std::size_t>(SignalId::speed)];
+    const auto& rpm = signalCatalog[static_cast<std::size_t>(SignalId::engine_rpm)];
+    const auto speedObservation = *snapshot.observe(speed.id);
+    const auto rpmObservation = *snapshot.observe(rpm.id);
+    const auto speedDial = detail::drawBrailleDial(scaleFraction(dialValue(snapshot, speed.id), speed));
+    const auto rpmDial = detail::drawBrailleDial(scaleFraction(dialValue(snapshot, rpm.id), rpm));
+    const auto invalid = snapshot.count(SignalStatus::invalid);
+    const auto missing = snapshot.count(SignalStatus::missing);
+    const auto valid = signalCount - invalid - missing;
+    const auto warningColor = invalid != 0 ? red : missing != 0 ? amber : green;
+    const std::array<std::string, detail::brailleDialHeight> center{
+        "", invalid + missing == 0 ? "EN ORDEN" : "ATENCION", "",
+        "VALID   " + std::to_string(valid), "INVALID " + std::to_string(invalid),
+        "MISSING " + std::to_string(missing), "",
+    };
+
+    const auto centered = [](std::string_view text) {
+        std::ostringstream line;
+        writeCentered(line, text);
+        return line.str();
+    };
+    writeInstrumentRow(out, centered("VELOCIDAD"), "GATEWAY", centered("RPM"));
+    for (std::size_t row = 0; row < speedDial.size(); ++row) {
+        writeInstrumentRow(out, speedDial[row], center[row], rpmDial[row],
+                           signalColor(speedObservation), warningColor, signalColor(rpmObservation));
+    }
+    std::ostringstream speedScale;
+    std::ostringstream rpmScale;
+    writeScale(speedScale, formatValue(speed.minimum), formatValue(speed.maximum));
+    writeScale(rpmScale, formatValue(rpm.minimum), formatValue(rpm.maximum));
+    writeInstrumentRow(out, speedScale.str(), "", rpmScale.str(), dim, reset, dim);
+    writeInstrumentRow(out, centered(dialCaption(speedObservation, speed.unit)), "",
+                       centered(dialCaption(rpmObservation, rpm.unit)),
+                       signalColor(speedObservation), reset, signalColor(rpmObservation));
+}
+
+void writeLiveGauge(std::ostream& out, const SignalSnapshot& snapshot, const SignalDescriptor& signal)
+{
+    const auto observation = *snapshot.observe(signal.id);
+    const auto color = signalColor(observation);
+    std::size_t filled = 0;
+    if (observation.sample && std::isfinite(observation.sample->value) &&
+        observation.status != SignalStatus::missing) {
+        const auto value = std::clamp(observation.sample->value, signal.minimum, signal.maximum);
+        const auto fraction = (value - signal.minimum) / (signal.maximum - signal.minimum);
+        filled = static_cast<std::size_t>(std::lround(fraction * static_cast<double>(gaugeWidth)));
+    }
+    const auto name = signalName(signal.id);
+    std::ostringstream value;
+    value << (observation.sample ? formatValue(observation.sample->value) : "---") << ' ' << signal.unit;
+    const auto reading = value.str();
+    const auto status = statusName(observation.status);
+    const auto age = observation.age ? std::to_string(*observation.age) : "-";
+    const auto freshness = freshnessName(observation.freshness);
+    constexpr std::size_t tailWidth = 24;
+    const auto freshnessWidth = freshness.size() + 1 + age.size() <= tailWidth ? freshness.size() : 3;
+    const auto tail = std::string(freshness.substr(0, freshnessWidth)) + ' ' + age;
+    out << dim << u8"\u2502" << reset << ' ' << name << spaces.substr(0, 12 - name.size()) << ' ' << color;
+    for (std::size_t cell = 0; cell < gaugeWidth; ++cell) {
+        out << (cell < filled ? u8"\u2588" : u8"\u2591");
+    }
+    out << reset << ' ' << reading << spaces.substr(0, 15 - reading.size()) << ' '
+        << color << status << reset << spaces.substr(0, 7 - status.size()) << ' '
+        << tail << spaces.substr(0, tailWidth - tail.size()) << dim << u8"\u2502" << reset << '\n';
+}
+
+void writeLiveControl(std::ostream& out, const ControlResult& control)
+{
+    const auto state = stateName(control.state);
+    const auto action = actionName(control.action);
+    constexpr std::string_view label = " ECU DE CONTROL  ";
+    constexpr std::string_view actionLabel = "  Accion ";
+    out << dim << u8"\u2502" << reset << label << stateBadge(control.state) << ' ' << state << ' ' << reset
+        << actionLabel << action
+        << std::string(panelWidth - label.size() - state.size() - 2 - actionLabel.size() - action.size(), ' ')
+        << dim << u8"\u2502" << reset << '\n';
+
+    std::ostringstream current;
+    current << " Diagnostico: ";
+    if (const auto primary = control.diagnostics.primary()) {
+        writeDiagnostic(current, *primary);
+        if (control.diagnostics.size() > 1) {
+            current << " (+" << control.diagnostics.size() - 1 << ')';
+        }
+    } else {
+        current << "NINGUNO";
+    }
+    writePanelLine(out, current.str());
+
+    std::ostringstream latched;
+    latched << " Enclavada: ";
+    if (control.latchedFault) {
+        writeDiagnostic(latched, control.latchedFault->cause);
+    } else {
+        latched << "NINGUNA";
+    }
+    writePanelLine(out, latched.str());
+    writePanelLine(out, control.latchedFault
+        ? " Ciclo de enclavamiento: " + std::to_string(control.latchedFault->cycle) : "");
+}
+
 }  // namespace
 
 DashboardFormat selectDashboardFormat(bool utf8Terminal, std::size_t columns) noexcept
@@ -294,6 +463,29 @@ bool renderDashboard(std::ostream& out, const SignalSnapshot& snapshot, const Co
     writeSignals(out, snapshot, columns != 0 && columns < dashboardMinBrailleColumns);
     writeControl(out, control);
     out << '\n';
+    return static_cast<bool>(out);
+}
+
+bool renderLiveDashboard(std::ostream& out, const SignalSnapshot& snapshot, const ControlResult& control)
+{
+    if (!out || snapshot.cycle() != control.cycle) {
+        return false;
+    }
+
+    writePanelBorder(out, u8"\u256d", u8"\u256e");
+    constexpr std::string_view title = " ECU GATEWAY / CONTROL";
+    const auto cycle = "CICLO " + std::to_string(snapshot.cycle()) + ' ';
+    writePanelLine(out, std::string(title) + std::string(panelWidth - title.size() - cycle.size(), ' ') + cycle);
+    writeLiveDials(out, snapshot);
+    writePanelBorder(out, u8"\u251c", u8"\u2524");
+    for (const auto& signal : signalCatalog) {
+        if (signal.id != SignalId::speed && signal.id != SignalId::engine_rpm) {
+            writeLiveGauge(out, snapshot, signal);
+        }
+    }
+    writePanelBorder(out, u8"\u251c", u8"\u2524");
+    writeLiveControl(out, control);
+    writePanelBorder(out, u8"\u2570", u8"\u256f");
     return static_cast<bool>(out);
 }
 

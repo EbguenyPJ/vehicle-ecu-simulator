@@ -3,13 +3,21 @@
 #include "ecu/dashboard.hpp"
 #include "ecu/simulation.hpp"
 
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <sstream>
 #include <string_view>
+#include <thread>
 
-#if defined(__unix__) || defined(__APPLE__)
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#elif defined(__unix__) || defined(__APPLE__)
 #include <clocale>
 #include <langinfo.h>
 #include <sys/ioctl.h>
@@ -20,13 +28,14 @@ namespace {
 
 constexpr std::string_view usage =
     "Uso: vehicle-ecu-simulator [nominal|faults|battery-fault|oil-fault|temperature-dropout] "
-    "[--dashboard auto|ascii|braille] [--csv ARCHIVO | --binary ARCHIVO]\n";
+    "[--dashboard auto|live|ascii|braille] [--csv ARCHIVO | --binary ARCHIVO]\n";
 
 enum class LogFormat { csv, binary };
+enum class DashboardMode { automatic, live, ascii, braille };
 
 struct Options {
     ecu::ScenarioKind scenario{ecu::ScenarioKind::nominal};
-    std::optional<ecu::DashboardFormat> dashboard;
+    DashboardMode dashboard{DashboardMode::automatic};
     const char* logPath{nullptr};
     LogFormat logFormat{LogFormat::csv};
 };
@@ -45,9 +54,11 @@ std::optional<Options> parseOptions(int argc, char* argv[])
             dashboardSeen = true;
             const std::string_view format = argv[++index];
             if (format == "ascii") {
-                options.dashboard = ecu::DashboardFormat::ascii;
+                options.dashboard = DashboardMode::ascii;
             } else if (format == "braille") {
-                options.dashboard = ecu::DashboardFormat::braille;
+                options.dashboard = DashboardMode::braille;
+            } else if (format == "live") {
+                options.dashboard = DashboardMode::live;
             } else if (format != "auto") {
                 return std::nullopt;
             }
@@ -83,34 +94,119 @@ std::optional<Options> parseOptions(int argc, char* argv[])
     return options;
 }
 
-struct TerminalOutput {
+class TerminalOutput {
+public:
+    TerminalOutput()
+    {
+#if defined(_WIN32)
+        CONSOLE_SCREEN_BUFFER_INFO size{};
+        if (::GetConsoleScreenBufferInfo(handle_, &size)) {
+            columns = static_cast<std::size_t>(size.srWindow.Right - size.srWindow.Left + 1);
+            rows = static_cast<std::size_t>(size.srWindow.Bottom - size.srWindow.Top + 1);
+        }
+        utf8 = ::GetConsoleOutputCP() == CP_UTF8;
+#elif defined(__unix__) || defined(__APPLE__)
+        if (::isatty(STDOUT_FILENO) == 0) {
+            return;
+        }
+
+        winsize size{};
+        if (::ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0) {
+            columns = size.ws_col;
+            rows = size.ws_row;
+        }
+
+        const char* term = std::getenv("TERM");
+        ansi_ = term != nullptr && *term != '\0' && std::string_view(term) != "dumb";
+        if ((term == nullptr || std::string_view(term) != "dumb") && std::setlocale(LC_CTYPE, "") != nullptr) {
+            const std::string_view encoding = ::nl_langinfo(CODESET);
+            utf8 = encoding == "UTF-8" || encoding == "UTF8" || encoding == "utf-8" || encoding == "utf8";
+        }
+#endif
+    }
+
+    TerminalOutput(const TerminalOutput&) = delete;
+    TerminalOutput& operator=(const TerminalOutput&) = delete;
+
+    ~TerminalOutput()
+    {
+#if defined(_WIN32)
+        if (liveEnabled_) {
+            ::SetConsoleOutputCP(previousCodePage_);
+            ::SetConsoleMode(handle_, previousMode_);
+        }
+#endif
+    }
+
+    [[nodiscard]] bool enableLive()
+    {
+        if (columns < ecu::dashboardMinBrailleColumns || rows < ecu::dashboardMinLiveRows) {
+            return false;
+        }
+#if defined(_WIN32)
+        previousCodePage_ = ::GetConsoleOutputCP();
+        if (previousCodePage_ == 0 || !::GetConsoleMode(handle_, &previousMode_) ||
+            !::SetConsoleMode(handle_, previousMode_ | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
+            return false;
+        }
+        if (!::SetConsoleOutputCP(CP_UTF8)) {
+            ::SetConsoleMode(handle_, previousMode_);
+            return false;
+        }
+        liveEnabled_ = true;
+        return true;
+#else
+        return ansi_ && utf8;
+#endif
+    }
+
     bool utf8{false};
     std::size_t columns{0};
+
+private:
+    std::size_t rows{0};
+#if defined(_WIN32)
+    HANDLE handle_{::GetStdHandle(STD_OUTPUT_HANDLE)};
+    DWORD previousMode_{0};
+    UINT previousCodePage_{0};
+    bool liveEnabled_{false};
+#else
+    bool ansi_{false};
+#endif
 };
 
-TerminalOutput detectTerminal()
-{
-    TerminalOutput terminal;
-#if defined(__unix__) || defined(__APPLE__)
-    if (::isatty(STDOUT_FILENO) == 0) {
-        return terminal;
+class LiveDashboard {
+public:
+    [[nodiscard]] bool render(const ecu::SignalSnapshot& snapshot, const ecu::ControlResult& control)
+    {
+        std::ostringstream frame;
+        if (!ecu::renderLiveDashboard(frame, snapshot, control)) {
+            return false;
+        }
+        constexpr auto period = std::chrono::milliseconds{500};
+        const bool firstFrame = !nextFrame_;
+        if (firstFrame) {
+            nextFrame_ = Clock::now();
+        } else {
+            std::this_thread::sleep_until(*nextFrame_);
+        }
+        const auto now = Clock::now();
+        if (now >= *nextFrame_ + period) {
+            nextFrame_ = now;
+        }
+        *nextFrame_ += period;
+
+        // La fila final deja el cursor debajo del panel dentro de una terminal de 24 filas.
+        if (firstFrame) {
+            std::cout << "\033[2J";
+        }
+        return static_cast<bool>(std::cout << "\033[H" << frame.str() << "\033[J" << std::flush);
     }
 
-    winsize size{};
-    if (::ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) == 0) {
-        terminal.columns = size.ws_col;
-    }
-
-    const char* term = std::getenv("TERM");
-    if ((term == nullptr || std::string_view(term) != "dumb") &&
-        std::setlocale(LC_CTYPE, "") != nullptr) {
-        const std::string_view encoding = ::nl_langinfo(CODESET);
-        terminal.utf8 = encoding == "UTF-8" || encoding == "UTF8" ||
-                        encoding == "utf-8" || encoding == "utf8";
-    }
-#endif
-    return terminal;
-}
+private:
+    using Clock = std::chrono::steady_clock;
+    std::optional<Clock::time_point> nextFrame_;
+};
 
 template <typename Writer, typename Render, typename ErrorMessage>
 bool runWithLog(const ecu::Scenario& scenario, const char* path, std::string_view format,
@@ -164,18 +260,28 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    const auto terminal = detectTerminal();
-    const auto format = options->dashboard.value_or(ecu::selectDashboardFormat(terminal.utf8, terminal.columns));
     const auto scenario = ecu::makeScenario(options->scenario);
     if (!scenario) {
         std::cerr << "No se pudo preparar el escenario.\n";
         return EXIT_FAILURE;
     }
 
+    TerminalOutput terminal;
+    const auto mode = options->dashboard;
+    const bool live = (mode == DashboardMode::automatic || mode == DashboardMode::live) && terminal.enableLive();
+    if (mode == DashboardMode::live && !live) {
+        std::cerr << "El Dashboard en vivo requiere una terminal ANSI y UTF-8 de al menos 80 x 24.\n";
+        return EXIT_FAILURE;
+    }
+    const auto format = mode == DashboardMode::braille ? ecu::DashboardFormat::braille
+        : mode == DashboardMode::ascii ? ecu::DashboardFormat::ascii
+        : ecu::selectDashboardFormat(terminal.utf8, terminal.columns);
+    LiveDashboard dashboard;
     bool outputOk = true;
     const auto render = [&](const ecu::SignalSnapshot& snapshot, const ecu::ControlResult& control) {
         if (outputOk) {
-            outputOk = ecu::renderDashboard(std::cout, snapshot, control, format, terminal.columns);
+            outputOk = live ? dashboard.render(snapshot, control)
+                : ecu::renderDashboard(std::cout, snapshot, control, format, terminal.columns);
         }
     };
 

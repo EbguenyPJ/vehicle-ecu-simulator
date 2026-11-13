@@ -298,6 +298,84 @@ void braille()
             "out-of-range and non-finite readings must not move the needles");
 }
 
+void expectPanelSize(std::string_view frame)
+{
+    std::size_t width = 0;
+    std::size_t rows = 0;
+    for (std::size_t index = 0; index < frame.size(); ++index) {
+        const auto byte = static_cast<unsigned char>(frame[index]);
+        if (byte == 0x1b) {
+            const auto end = frame.find('m', index + 2);
+            require(index + 1 < frame.size() && frame[index + 1] == '[' && end != frame.npos,
+                    "only color sequences belong to the panel");
+            const auto parameters = frame.substr(index + 2, end - index - 2);
+            require(parameters.find_first_not_of("0123456789;") == frame.npos, "invalid SGR parameters");
+            index = end;
+        } else if (byte == '\n') {
+            require(width == 79, "every row must fit without wrapping in 80 columns");
+            ++rows;
+            width = 0;
+        } else if ((byte & 0xc0u) != 0x80u) {
+            ++width;
+        }
+    }
+    require(rows == 23 && width == 0, "the panel must leave the last terminal row free");
+}
+
+std::string livePanel(const SignalSnapshot& snapshot, const ControlResult& result)
+{
+    std::ostringstream out;
+    require(renderLiveDashboard(out, snapshot, result), "a coherent live frame must render");
+    const auto frame = out.str();
+    expectPanelSize(frame);
+    return frame;
+}
+
+void live()
+{
+    Gateway gateway{GatewayConfig{std::numeric_limits<Cycle>::max()}};
+    ControlECU control;
+    const auto initial = livePanel(gateway.snapshot(), ControlResult{});
+    expectText(initial, "\033[97;100m INIT ");
+    expectText(initial, "MISSING 6");
+
+    auto batch = auxiliaryReadings();
+    batch.add(SignalId::speed, 40.0);
+    batch.add(SignalId::engine_rpm, 1800.0);
+    const auto starting = process(gateway, control, 1, batch);
+    const auto started = livePanel(starting.snapshot, starting.result);
+    expectText(started, "\033[97;44m SELF_TEST ");
+    expectText(started, "VALID   6");
+    expectText(started, u8"\033[92m\u2588");
+    const auto latest = process(gateway, control, std::numeric_limits<Cycle>::max(), SignalBatch{},
+                                ControlEvent::shutdown);
+    const auto stopped = livePanel(latest.snapshot, latest.result);
+    expectText(stopped, "CICLO 18446744073709551615");
+    expectText(stopped, "RET 18446744073709551614");
+    expectText(stopped, "\033[97;45m SHUTDOWN ");
+    std::ostringstream rejected;
+    require(!renderLiveDashboard(rejected, starting.snapshot, latest.result) && rejected.str().empty(),
+            "inconsistent cycles must not render");
+
+    const auto scenario = makeScenario(ScenarioKind::faults);
+    require(scenario && runScenario(*scenario, [](const SignalSnapshot& snapshot, const ControlResult& result) {
+        const auto panel = livePanel(snapshot, result);
+        if (snapshot.cycle() == 9) {
+            expectText(panel, "\033[91mINVALID");
+            expectText(panel, "\033[30;103m DEGRADED ");
+        }
+        if (snapshot.cycle() == 17) {
+            expectText(panel, "\033[97;41m SAFE_STATE ");
+            expectText(panel, "Diagnostico: SENAL_CADUCADA [Temperatura] (+5)");
+            expectText(panel, "Enclavada: SENAL_CADUCADA [Temperatura]");
+        }
+        if (snapshot.cycle() == 42) {
+            expectText(panel, "Ciclo de enclavamiento: 17");
+            expectText(panel, "\033[97;45m SHUTDOWN ");
+        }
+    }), "every frame of the fault scenario must fit");
+}
+
 void pipeline()
 {
     const auto scenario = makeScenario(ScenarioKind::faults);
@@ -466,6 +544,7 @@ struct TestCase {
 constexpr std::array cases{
     TestCase{"ascii", ascii},
     TestCase{"braille", braille},
+    TestCase{"live", live},
     TestCase{"pipeline", pipeline},
     TestCase{"lifecycle", lifecycle},
     TestCase{"summary", summary},

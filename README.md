@@ -18,10 +18,11 @@ cmake --build build --config Debug
 (cd build && ctest -C Debug --output-on-failure)
 ```
 
-Con un generador de configuración única, el ejecutable admite `./build/vehicle-ecu-simulator [nominal|faults|battery-fault|oil-fault|temperature-dropout] [--dashboard auto|ascii|braille] [--csv ARCHIVO | --binary ARCHIVO]`.
+Con un generador de configuración única, el ejecutable admite `./build/vehicle-ecu-simulator [nominal|faults|battery-fault|oil-fault|temperature-dropout] [--dashboard auto|live|ascii|braille] [--csv ARCHIVO | --binary ARCHIVO]`.
 
 ```sh
 ./build/vehicle-ecu-simulator nominal
+./build/vehicle-ecu-simulator faults --dashboard live
 ./build/vehicle-ecu-simulator faults --dashboard ascii > fallas.txt
 ./build/vehicle-ecu-simulator faults --dashboard braille
 ./build/vehicle-ecu-simulator battery-fault --dashboard ascii
@@ -31,7 +32,9 @@ Con un generador de configuración única, el ejecutable admite `./build/vehicle
 ./build/vehicle-ecu-simulator faults --binary "recorrido con fallas.bin"
 ```
 
-El escenario predeterminado es `nominal` y el formato predeterminado es `auto`. En macOS y Linux, `auto` selecciona braille si la salida es una terminal de al menos 80 columnas y la configuración regional indica UTF-8. Usa ASCII en una terminal más estrecha, al redirigir la salida o si la capacidad de la terminal no puede confirmarse. En otros entornos, la selección automática usa ASCII. La opción explícita `--dashboard braille` genera UTF-8 incluso con la salida redirigida.
+El escenario predeterminado es `nominal` y el modo predeterminado es `auto`. En una terminal ANSI con UTF-8 de al menos 80 columnas × 24 filas, `auto` activa el panel en vivo. La terminal debe usar una fuente monoespaciada con glifos braille. `--dashboard live` solicita el panel explícitamente e informa si la terminal es incompatible. En macOS y Linux se comprueban `TERM`, el tamaño y la configuración regional. En Windows se intenta habilitar el procesamiento ANSI y UTF-8 en la consola.
+
+Con la salida redirigida, `auto` genera la traza ASCII. Si la terminal admite braille pero queda por debajo de 24 filas, `auto` puede generar la traza braille. Los modos explícitos `ascii` y `braille` imprimen todos los ciclos en secuencia, también al redirigirlos.
 
 El ejecutable devuelve 0 cuando completa el guion y publica `SHUTDOWN`, incluso si el escenario activó `SAFE_STATE`. Una falla simulada se comunica mediante los resultados de Control; un error de ejecución o de salida produce un código distinto de cero. Con un generador multiconfiguración, usa el ejecutable de la configuración compilada, por ejemplo `build/Debug/vehicle-ecu-simulator`.
 
@@ -338,16 +341,19 @@ La agenda combinada `faults` utiliza estos eventos:
 
 | Formato   | Presentación                                                                                                                                                                             |
 | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `live`    | Panel de 79 columnas × 23 filas, con relojes braille de velocidad y RPM, resumen central de Gateway, cuatro barras y una etiqueta de Control con fondo de color. |
 | `ascii`   | Tabla de seis señales con valor, unidad, resultado de Gateway, calidad, frescura y edad en ciclos. En terminales de ancho conocido inferior a 80 columnas, presenta cada señal por campos en líneas separadas. |
 | `braille` | Relojes UTF-8 de velocidad y RPM seguidos de la misma tabla. Cada reloj dibuja su aguja únicamente si la lectura está fresca y es válida.                                                |
 
-El resultado de Gateway aparece bajo la columna `Gateway` de la tabla o el campo `Resultado` de la vista compacta. La calidad de la última muestra y su frescura aparecen en campos independientes. Una muestra retenida o caducada conserva su valor para diagnóstico, con la antigüedad visible y la marca `RETENIDA` o `CADUCADA`. Si la señal nunca se recibió, el valor y la edad se muestran como ausentes. Los valores no finitos aparecen como `nan`, `+inf` o `-inf`.
+El panel se redibuja en el mismo sitio cada 500 ms y deja libre la última fila de una terminal de 80 × 24. La CLI aplica la cadencia al presentar cada ciclo, desde `SELF_TEST` en los escenarios de arranque sano hasta `SHUTDOWN`. Las barras corresponden a temperatura, acelerador, batería y aceite. El verde indica una muestra fresca y válida, el ámbar indica retención o ausencia y el rojo indica una muestra inválida. Control muestra la acción, el diagnóstico principal con la cantidad de hallazgos adicionales y la causa enclavada con su ciclo. El marco conserva su tamaño cuando aparecen fallas simultáneas. Se puede registrar la ejecución en vivo con `--csv` o `--binary`.
+
+En las trazas de texto, el resultado de Gateway aparece bajo la columna `Gateway` o el campo `Resultado` de la vista compacta. La calidad de la última muestra y su frescura aparecen en campos independientes. Una muestra retenida o caducada conserva su valor para diagnóstico, con la antigüedad visible y la marca `RETENIDA` o `CADUCADA`. Si la señal nunca se recibió, el valor y la edad se muestran como ausentes. Los valores no finitos aparecen como `nan`, `+inf` o `-inf`.
 
 Las filas de señales caben en 80 columnas incluso con edad máxima de 64 bits. La presentación usa seis cifras significativas; si un valor excede los diez caracteres reservados, usa notación científica con dos decimales. Ese redondeo afecta solo al texto, no al valor conservado por Gateway.
 
 Después de las señales, ambas vistas y el formato compacto muestran un resumen del mismo ciclo, por ejemplo `Resumen Gateway: VALID=2 INVALID=1 MISSING=3`. El Dashboard consulta los conteos de `INVALID` y `MISSING`, y obtiene `VALID` por diferencia con `signalCount`: son dos recorridos del catálogo. El resumen cuenta señales, no diagnósticos de Control. Por eso una sobretemperatura dentro del rango aceptado por Gateway puede sumar en `VALID` mientras Control publica un diagnóstico crítico.
 
-La sección de Control muestra el estado, la acción simulada y todos los diagnósticos del ciclo. La causa y el ciclo originales del enclavamiento aparecen por separado. En el ciclo 18 de `faults`, las señales recuperan su frescura y Control sigue en `SAFE_STATE` con la causa del ciclo 17. En el 20, la sobretemperatura aparece como diagnóstico activo junto a esa misma causa enclavada. El último cuadro muestra `SHUTDOWN` con salida inhibida y conserva esa misma causa enclavada. Ambos formatos escriben un cuadro por ciclo en secuencia, sin códigos ANSI ni pausas.
+En ASCII y braille, la sección de Control muestra el estado, la acción simulada y todos los diagnósticos del ciclo. La causa y el ciclo originales del enclavamiento aparecen por separado. En el ciclo 18 de `faults`, las señales recuperan su frescura y Control sigue en `SAFE_STATE` con la causa del ciclo 17. En el 20, la sobretemperatura aparece como diagnóstico activo junto a esa misma causa enclavada. El último cuadro muestra `SHUTDOWN` con salida inhibida y conserva esa misma causa enclavada. Las trazas se imprimen sin códigos ANSI ni pausas.
 
 ## Registro CSV
 
@@ -400,6 +406,7 @@ El lector `CsvReader` recupera registros desde un flujo C++ y distingue fin de a
 | DASH-03  | Renderizar ambas vistas sobre el mismo ciclo durante el guion real, diferenciando diagnóstico actual, causa enclavada y apagado.                       | `dashboard.pipeline`        |
 | DASH-04  | Presentar `INIT`, `SELF_TEST` y `SHUTDOWN` en ambas vistas con acción inhibida y causa enclavada conservada. | `dashboard.lifecycle` |
 | DASH-05  | Mostrar el resumen del mismo ciclo en ASCII, braille y vista compacta, distinguiendo cantidad de señales de diagnósticos y causa enclavada.                                       | `dashboard.summary`          |
+| DASH-06  | Mantener el panel en vivo dentro de 79 × 23 con colores, barras, diagnósticos y ciclos de 64 bits. | `dashboard.live` |
 | SCAL-01  | Comprobar perfiles, bits, límites y conversiones conocidas de temperatura y batería.                                                                                           | `scaling.profiles`           |
 | SCAL-02  | Verificar redondeo del crudo calculado, empates representables y vecinos de frontera.                                                                                           | `scaling.rounding`           |
 | SCAL-03  | Saturar por los extremos físicos antes de convertir a entero, incluidos factores negativos y valores finitos extremos.                                                        | `scaling.saturation`         |
@@ -428,9 +435,9 @@ La validación local registrada utiliza macOS 26.5 arm64, AppleClang 21.0.0 y CM
 
 | Configuración | Resultado local |
 | --- | --- |
-| Debug con benchmarks | 56/56 pruebas CTest aprobadas. |
-| Release con benchmarks | 56/56 pruebas CTest aprobadas. |
-| Debug con AddressSanitizer, UndefinedBehaviorSanitizer y benchmarks | 56/56 pruebas CTest aprobadas. |
+| Debug con benchmarks | 57/57 pruebas CTest aprobadas. |
+| Release con benchmarks | 57/57 pruebas CTest aprobadas. |
+| Debug con AddressSanitizer, UndefinedBehaviorSanitizer y benchmarks | 57/57 pruebas CTest aprobadas. |
 
 Para reproducir estas configuraciones desde la raíz del proyecto:
 
